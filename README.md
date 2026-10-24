@@ -1,21 +1,23 @@
 # raft-kv
 
-A fault tolerant, replicated key value store built on a from scratch implementation of the **Raft consensus algorithm** in Java 21, with no external dependencies.
+A fault tolerant, replicated key value store built on a from scratch implementation of the Raft consensus algorithm in Java 21, with no external dependencies.
 
-Any minority of nodes can crash, restart, or be cut off by a network partition, and the store keeps serving **linearizable** reads and writes without losing a single acknowledged write. A randomized fault injection test checks this continuously.
+I wanted to understand Raft well enough to break it on purpose. Reading the paper is one thing; getting a cluster to survive crashes, partitions and dropped messages without losing a write is another. If you only look at one thing here, make it the chaos test further down.
 
-## What is implemented
+Any minority of nodes can crash, restart, or be cut off by a network partition, and the store keeps serving linearizable reads and writes without losing a single acknowledged write. A randomized fault injection test checks this continuously.
 
-* **Leader election** with randomized timeouts, durable votes, and the election restriction (a node only votes for candidates whose log is at least as up to date)
-* **PreVote**, so a node that was partitioned away or just restarted cannot force a healthy leader to step down
-* **Log replication** with pipelining and fast conflict backtracking (skips back a whole term per round trip)
-* **Commit rule** for current term entries, with a no-op appended on election
-* **Group commit**: all writes that arrive while an fsync is in progress share the next one
-* **Linearizable reads via ReadIndex**, without writing reads to the log, and without ever serving a stale value from a deposed leader
-* **Exactly once writes**: client id plus sequence number deduplication, so a retried write that already committed is not applied twice
-* **Crash safe storage**: CRC32C checksummed append only log with torn write recovery; term and vote replaced atomically
-* **TCP transport** with length prefixed frames, batched writes and reconnects, all on virtual threads
-* **HTTP API** with automatic redirects from followers to the leader
+## What's in it
+
+* Leader election with randomized timeouts, durable votes, and the election restriction (a node only votes for candidates whose log is at least as up to date)
+* PreVote, so a node that was partitioned away or just restarted cannot force a healthy leader to step down
+* Log replication with pipelining and fast conflict backtracking (skips back a whole term per round trip)
+* Commit rule for current term entries, with a no-op appended on election
+* Group commit: all writes that arrive while an fsync is in progress share the next one
+* Linearizable reads via ReadIndex, without writing reads to the log, and without ever serving a stale value from a deposed leader
+* Exactly once writes: client id plus sequence number deduplication, so a retried write that already committed is not applied twice
+* Crash safe storage: CRC32C checksummed append only log with torn write recovery; term and vote replaced atomically
+* TCP transport with length prefixed frames, batched writes and reconnects, all on virtual threads
+* HTTP API with automatic redirects from followers to the leader
 
 ## Architecture
 
@@ -64,10 +66,10 @@ make chaos SEED=1743191622389      # replay the exact fault schedule of a past r
 
 `Cluster` runs five nodes in one process on a simulated network that drops 5% of messages and delays (and so reorders) the rest. While it runs, two of Raft's safety properties are checked on every event:
 
-* **Election Safety**: at most one leader is ever elected per term
-* **State Machine Safety**: no two nodes ever apply different commands at the same index
+* Election Safety: at most one leader is ever elected per term
+* State Machine Safety: no two nodes ever apply different commands at the same index
 
-`ChaosTest` adds eight concurrent clients and a nemesis that, every few hundred milliseconds, crashes a node (discarding anything not fsynced), restarts one, isolates the leader, or splits the cluster at random. At the end it heals everything and verifies that **every acknowledged write is present on every replica** and that all replicas are identical. A typical 45 second run injects about 140 faults, forces 20 to 30 leader elections, and acknowledges about 20,000 writes with zero violations.
+`ChaosTest` adds eight concurrent clients and a nemesis that, every few hundred milliseconds, crashes a node (discarding anything not fsynced), restarts one, isolates the leader, or splits the cluster at random. At the end it heals everything and verifies that every acknowledged write is present on every replica and that all replicas are identical. A typical 45 second run injects about 140 faults, forces 20 to 30 leader elections, and acknowledges about 20,000 writes with zero violations.
 
 The tests were also checked against deliberately broken versions of the protocol: removing the election restriction and the current term commit rule makes the chaos test fail.
 
@@ -87,7 +89,7 @@ Five nodes in one JVM on a 2 vCPU cloud VM, real TCP between nodes, 100 byte val
 | 64 clients, fsync per write (`-Draftkv.groupCommit=false`) | 2,180 | 28.8 ms | 47.0 ms |
 | 1 client | 984 | 0.9 ms | 3.3 ms |
 
-Group commit gives a **7.6x** throughput increase and a 10x lower median latency under load. Because all five nodes share two CPUs and one disk, a real deployment would do better.
+Group commit gives a 7.6x throughput increase and a 10x lower median latency under load. Because all five nodes share two CPUs and one disk, a real deployment would do better.
 
 ## Run a five node cluster
 
@@ -106,7 +108,7 @@ scripts/cluster.sh stop
 
 To make writes exactly once across retries, send `X-Client-Id` and an increasing `X-Request-Seq` header.
 
-## Limitations and next steps
+## What I'd do next
 
 * No log compaction or snapshots, so the log and the in memory copy grow without bound
 * Cluster membership is fixed at startup (no joint consensus)
@@ -116,3 +118,7 @@ To make writes exactly once across retries, send `X-Client-Id` and an increasing
 ## Reference
 
 Diego Ongaro and John Ousterhout, *In Search of an Understandable Consensus Algorithm*, USENIX ATC 2014, and Ongaro's PhD thesis (PreVote, section 9.6; ReadIndex, section 6.4).
+
+---
+
+If something here is unclear, broken, or just wrong, feel free to open an issue. I'm always happy to chat about it.
