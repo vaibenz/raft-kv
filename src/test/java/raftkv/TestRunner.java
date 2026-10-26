@@ -10,7 +10,8 @@ import java.util.List;
 /** Runs every {@link Test} method in the listed classes. Pass class names to run a subset. */
 public final class TestRunner {
     private static final List<Class<?>> ALL = List.of(CodecTest.class, KvStateMachineTest.class,
-            FileStorageTest.class, RaftTest.class, ChaosTest.class, TcpClusterTest.class);
+            FileStorageTest.class, raftkv.sim.LinearizabilityTest.class, raftkv.sim.StorageCrashTest.class,
+            RaftTest.class, ChaosTest.class, TcpClusterTest.class, raftkv.sim.SimTest.class);
 
     public static void main(String[] args) throws Exception {
         List<Class<?>> classes = new ArrayList<>();

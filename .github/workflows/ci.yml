@@ -13,3 +13,7 @@ jobs:
         run: make test
       - name: Extended chaos run
         run: make chaos CHAOS_SECONDS=60
+      - name: Deterministic simulation, 2000 seeds
+        run: make sim SEEDS=2000
+      - name: Every planted bug is caught
+        run: make mutations
