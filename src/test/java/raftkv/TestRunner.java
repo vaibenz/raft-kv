@@ -11,6 +11,7 @@ import java.util.List;
 public final class TestRunner {
     private static final List<Class<?>> ALL = List.of(CodecTest.class, KvStateMachineTest.class,
             FileStorageTest.class, raftkv.sim.LinearizabilityTest.class, raftkv.sim.StorageCrashTest.class,
+            raftkv.lsm.LsmStoreTest.class, raftkv.sim.LsmCrashTest.class,
             RaftTest.class, ChaosTest.class, TcpClusterTest.class, raftkv.sim.SimTest.class);
 
     public static void main(String[] args) throws Exception {

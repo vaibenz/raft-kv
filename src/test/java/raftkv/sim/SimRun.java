@@ -15,7 +15,11 @@ import raftkv.core.Listener;
 import raftkv.core.NotLeaderException;
 import raftkv.core.RaftConfig;
 import raftkv.core.RaftNode;
+import raftkv.core.StateMachine;
 import raftkv.kv.KvStateMachine;
+import raftkv.kv.KvStore;
+import raftkv.kv.LsmStateMachine;
+import raftkv.lsm.LsmStore;
 import raftkv.storage.FileStorage;
 
 /**
@@ -42,18 +46,20 @@ public final class SimRun {
     /** What happened during a run, for the summary line and for aggregation across seeds. */
     public static final class Stats {
         public int nodes, clients, keys;
+        public boolean lsm;
         public long faults, crashes, partitions, leaders, opsOk, opsUnknown, opsAbandonedReads;
         public long messagesSent, messagesDelivered, virtualMs, steps;
-        public long snapshotsTaken, snapshotsInstalled, tornWrites, ioErrors, crashPoints;
+        public long snapshotsTaken, snapshotsInstalled, tornWrites, ioErrors, crashPoints, lsmFlushes, lsmCompactions;
 
         @Override
         public String toString() {
-            return String.format("%d nodes, %d clients, %d keys | %d faults (%d crashes, %d mid I/O, %d partitions, "
-                            + "%d torn writes, %d I/O errors), %d leaders, %d snapshots taken, %d installed | %d ops "
-                            + "checked, %d with unknown outcome | %d msgs | %.1f s virtual, %d events",
-                    nodes, clients, keys, faults, crashes, crashPoints, partitions, tornWrites, ioErrors, leaders,
-                    snapshotsTaken,
-                    snapshotsInstalled, opsOk + opsUnknown, opsUnknown, messagesSent, virtualMs / 1000.0, steps);
+            return String.format("%d nodes on %s, %d clients, %d keys | %d faults (%d crashes, %d mid I/O, %d partitions, "
+                            + "%d torn writes, %d I/O errors), %d leaders, %d snapshots taken, %d installed, %d LSM "
+                            + "flushes, %d compactions | %d ops checked, %d with unknown outcome | %d msgs | %.1f s "
+                            + "virtual, %d events",
+                    nodes, lsm ? "lsm" : "memory", clients, keys, faults, crashes, crashPoints, partitions, tornWrites,
+                    ioErrors, leaders, snapshotsTaken, snapshotsInstalled, lsmFlushes, lsmCompactions,
+                    opsOk + opsUnknown, opsUnknown, messagesSent, virtualMs / 1000.0, steps);
         }
     }
 
@@ -73,6 +79,7 @@ public final class SimRun {
     private final Stats stats = new Stats();
     private final List<String> keys = new ArrayList<>();
     private final double assassinate; // chance that a newly elected leader is crashed moments later
+    private final boolean useLsm;     // every node keeps its data in the LSM tree on its simulated disk
     private int nextOpId;
     private boolean issuing = true;
     private int outstanding;
@@ -86,7 +93,7 @@ public final class SimRun {
         final SimDisk disk;
         final double drift;
         RaftNode raft;
-        KvStateMachine machine;
+        KvStore machine;
         boolean up;
 
         SimNode(String id, double drift) {
@@ -99,8 +106,18 @@ public final class SimRun {
             List<String> peers = new ArrayList<>(ids);
             peers.remove(id);
             FileStorage storage;
+            StateMachine sm;
             try {
                 storage = new FileStorage(disk.root());
+                if (useLsm) { // reopened from its own files, then the log after its durable point is replayed
+                    LsmStateMachine lsm = new LsmStateMachine(disk.root().subdir("sm"), LsmStore.Options.tiny());
+                    sm = lsm;
+                    machine = lsm;
+                } else { // rebuilt from the snapshot and log, as after a real restart
+                    KvStateMachine mem = new KvStateMachine();
+                    sm = mem;
+                    machine = mem;
+                }
             } catch (java.io.UncheckedIOException | SimDisk.Crash e) { // died while opening: stay down
                 disk.crash();
                 return;
@@ -111,8 +128,7 @@ public final class SimRun {
                 violations.add("storage on " + id + " failed to open after a crash: " + e);
                 return;
             }
-            machine = new KvStateMachine(); // rebuilt from the snapshot and log, as after a real restart
-            raft = new RaftNode(id, peers, storage, machine, config, invariants, net.factory(),
+            raft = new RaftNode(id, peers, storage, sm, config, invariants, net.factory(),
                     new SimEventLoop(sim, drift, this::crash), new Random(sim.random.nextLong()));
             up = true;
             raft.start();
@@ -127,6 +143,10 @@ public final class SimRun {
             if (!up) return;
             up = false;
             raft.stop();
+            if (machine instanceof LsmStateMachine lsm) {
+                stats.lsmFlushes += lsm.store().stats().flushes;
+                stats.lsmCompactions += lsm.store().stats().compactions;
+            }
             disk.crash(); // anything not durable is gone, and the tail of what was in flight may be torn
         }
 
@@ -217,6 +237,8 @@ public final class SimRun {
         stats.keys = keyCount;
         stats.clients = 2 + r.nextInt(6);
         assassinate = r.nextDouble() < 0.5 ? 0 : 0.5 * r.nextDouble();
+        useLsm = r.nextBoolean();
+        stats.lsm = useLsm;
         Buggify.enable(new Random(seed * 0x9E3779B97F4A7C15L));
     }
 
@@ -507,7 +529,7 @@ public final class SimRun {
             int attempt = ++p.attempts;
             if (n != null) {
                 RaftNode raft = n.raft;
-                KvStateMachine machine = n.machine;
+                KvStore machine = n.machine;
                 sim.after(clientDelay(), () -> {
                     if (p.done || !n.alive() || n.raft != raft) return;
                     raft.readBarrier().whenComplete((ignored, err) -> {
