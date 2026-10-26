@@ -51,7 +51,14 @@ public final class Cluster implements AutoCloseable {
         }
     };
 
+    private final RaftConfig config;
+
     public Cluster(int size, long seed) {
+        this(size, seed, RaftConfig.fast());
+    }
+
+    public Cluster(int size, long seed, RaftConfig config) {
+        this.config = config;
         net = new InMemoryNetwork(seed);
         for (int i = 1; i <= size; i++) {
             String id = "n" + i;
@@ -65,7 +72,7 @@ public final class Cluster implements AutoCloseable {
         List<String> peers = new ArrayList<>(ids);
         peers.remove(id);
         KvStateMachine sm = new KvStateMachine(); // rebuilt from the log, as after a real restart
-        RaftNode node = new RaftNode(id, peers, storages.get(id), sm, RaftConfig.fast(), invariants, net.factory());
+        RaftNode node = new RaftNode(id, peers, storages.get(id), sm, config, invariants, net.factory());
         machines.put(id, sm);
         live.put(id, node);
         node.start();

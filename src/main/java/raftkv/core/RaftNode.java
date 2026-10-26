@@ -15,6 +15,8 @@ import raftkv.core.Buggify.Site;
 import raftkv.core.EventLoop.Cancellable;
 import raftkv.core.Message.AppendEntries;
 import raftkv.core.Message.AppendReply;
+import raftkv.core.Message.InstallSnapshot;
+import raftkv.core.Message.SnapshotReply;
 import raftkv.core.Message.RequestVote;
 import raftkv.core.Message.VoteReply;
 import raftkv.storage.Storage;
@@ -32,14 +34,15 @@ import raftkv.transport.TransportFactory;
  *
  * <p>Implemented: leader election with randomized timeouts and PreVote, log replication with conflict backtracking and
  * pipelining, the commit rule for current term entries, a leader no-op on election, group commit (one fsync
- * per batch of client writes), and linearizable reads via ReadIndex.
+ * per batch of client writes), linearizable reads via ReadIndex, and log compaction with snapshots
+ * (InstallSnapshot for followers that fall behind the compacted log).
  */
 public final class RaftNode {
     public enum Role { FOLLOWER, CANDIDATE, LEADER }
 
     /** A thread safe snapshot of the node's state, for monitoring and tests. */
     public record Status(String id, Role role, long term, String leaderId, long commitIndex, long lastApplied,
-                         long lastLogIndex) {}
+                         long lastLogIndex, long snapshotIndex) {}
 
     private record PendingWrite(long term, CompletableFuture<byte[]> future) {}
 
@@ -82,6 +85,7 @@ public final class RaftNode {
     private final Map<String, Long> nextIndex = new HashMap<>();
     private final Map<String, Long> matchIndex = new HashMap<>();
     private final Map<String, Long> ackedRound = new HashMap<>();
+    private final Map<String, Long> snapshotSentAt = new HashMap<>(); // throttles resending a large snapshot
     private long round;       // heartbeat round, for ReadIndex
     private long syncedIndex; // highest index durable on this leader's own disk
     private boolean flushScheduled;
@@ -118,7 +122,13 @@ public final class RaftNode {
     public void start() {
         running = true;
         transport = transportFactory.connect(id, this::receive);
-        run(this::resetElectionTimer);
+        run(() -> {
+            if (storage.snapshotIndex() > 0) { // resume from the snapshot; the log after it is replayed on commit
+                stateMachine.restore(storage.snapshotData());
+                commitIndex = lastApplied = storage.snapshotIndex();
+            }
+            resetElectionTimer();
+        });
     }
 
     /** Stops the node abruptly, as a crash would: nothing in flight is finished. */
@@ -131,6 +141,11 @@ public final class RaftNode {
 
     public String id() {
         return id;
+    }
+
+    /** False once the node has been stopped, including when it stopped itself after a storage failure. */
+    public boolean isRunning() {
+        return running;
     }
 
     public Status status() {
@@ -197,12 +212,14 @@ public final class RaftNode {
         } catch (RuntimeException e) {
             System.err.println(id + ": unexpected error: " + e);
             e.printStackTrace();
+            listener.onError(id, e);
         }
         publish();
     }
 
     private void publish() {
-        status = new Status(id, role, storage.term(), leaderId, commitIndex, lastApplied, storage.lastIndex());
+        status = new Status(id, role, storage.term(), leaderId, commitIndex, lastApplied, storage.lastIndex(),
+                storage.snapshotIndex());
     }
 
     private void send(String to, Message m) {
@@ -228,6 +245,8 @@ public final class RaftNode {
             case VoteReply vr -> onVoteReply(vr);
             case AppendEntries ae -> onAppendEntries(ae);
             case AppendReply ar -> onAppendReply(ar);
+            case InstallSnapshot is -> onInstallSnapshot(is);
+            case SnapshotReply sr -> onSnapshotReply(sr);
         }
     }
 
@@ -388,6 +407,10 @@ public final class RaftNode {
 
     private void sendAppend(String peer) {
         long next = nextIndex.get(peer);
+        if (next <= storage.snapshotIndex()) { // the entries it needs are gone: send the snapshot instead
+            sendSnapshot(peer);
+            return;
+        }
         long prev = next - 1;
         int batch = Buggify.fire(Site.TINY_APPEND_BATCH, 0.5) ? 1 : config.maxBatch();
         long last = Math.min(syncedIndex, prev + batch); // only ship entries that are durable here
@@ -419,9 +442,29 @@ public final class RaftNode {
         serviceReads();
     }
 
+    private void sendSnapshot(String peer) {
+        long last = snapshotSentAt.getOrDefault(peer, Long.MIN_VALUE / 2);
+        if (now() - last < config.electionMinMs()) return; // one is probably still in flight
+        snapshotSentAt.put(peer, now());
+        send(peer, new InstallSnapshot(storage.term(), id, storage.snapshotIndex(), storage.snapshotTerm(),
+                storage.snapshotData(), round));
+    }
+
+    private void onSnapshotReply(SnapshotReply r) {
+        if (role != Role.LEADER || r.term() != storage.term()) return;
+        ackedRound.merge(r.from(), r.round(), Math::max);
+        snapshotSentAt.remove(r.from());
+        long match = matchIndex.merge(r.from(), r.lastIndex(), Math::max);
+        if (nextIndex.get(r.from()) <= match) nextIndex.put(r.from(), match + 1);
+        advanceCommitIndex();
+        if (nextIndex.get(r.from()) <= syncedIndex) sendAppend(r.from());
+        serviceReads();
+    }
+
     private long lastIndexOfTerm(long term) {
+        long floor = storage.snapshotIndex(); // termAt is only defined down to the snapshot
         long i = storage.lastIndex();
-        while (i > 0 && storage.termAt(i) > term) i--;
+        while (i > floor && storage.termAt(i) > term) i--;
         return i > 0 && storage.termAt(i) == term ? i : 0;
     }
 
@@ -454,22 +497,34 @@ public final class RaftNode {
         lastHeardFromLeader = now();
         resetElectionTimer();
 
-        long prev = ae.prevLogIndex();
+        long prev = ae.prevLogIndex(), prevTerm = ae.prevLogTerm();
+        List<LogEntry> entries = ae.entries();
+        long snap = storage.snapshotIndex();
+        if (prev < snap) {
+            // Everything up to the snapshot is committed, so it matches the leader: skip that part.
+            long skip = snap - prev;
+            if (skip >= entries.size()) {
+                send(ae.from(), new AppendReply(term, id, true, prev + entries.size(), 0, 0, ae.round()));
+                return;
+            }
+            entries = entries.subList((int) skip, entries.size());
+            prev = snap;
+            prevTerm = storage.snapshotTerm();
+        }
         if (prev > storage.lastIndex()) {
             send(ae.from(), new AppendReply(term, id, false, 0, storage.lastIndex() + 1, 0, ae.round()));
             return;
         }
-        if (storage.termAt(prev) != ae.prevLogTerm()) {
+        if (storage.termAt(prev) != prevTerm) {
             long conflictTerm = storage.termAt(prev);
             long first = prev;
-            while (first > 1 && storage.termAt(first - 1) == conflictTerm) first--;
+            while (first > snap + 1 && storage.termAt(first - 1) == conflictTerm) first--;
             send(ae.from(), new AppendReply(term, id, false, 0, first, conflictTerm, ae.round()));
             return;
         }
 
         // Skip entries we already have; truncate only at a real conflict. Never truncate on a merely shorter
         // (possibly stale, reordered) message, or we could delete entries that were already acknowledged.
-        List<LogEntry> entries = ae.entries();
         int i = 0;
         for (; i < entries.size(); i++) {
             long idx = prev + 1 + i;
@@ -491,6 +546,26 @@ public final class RaftNode {
         send(ae.from(), new AppendReply(term, id, true, lastNew, 0, 0, ae.round()));
     }
 
+    private void onInstallSnapshot(InstallSnapshot s) {
+        long term = storage.term();
+        if (s.term() < term) {
+            send(s.from(), new SnapshotReply(term, id, 0, s.round()));
+            return;
+        }
+        if (role != Role.FOLLOWER) stepDown(term, s.from());
+        leaderId = s.from();
+        preVoting = false;
+        lastHeardFromLeader = now();
+        resetElectionTimer();
+        if (s.lastIndex() > commitIndex) { // otherwise everything in it is already committed here
+            storage.installSnapshot(s.lastIndex(), s.lastTerm(), s.data()); // durable before we acknowledge
+            stateMachine.restore(s.data());
+            commitIndex = lastApplied = s.lastIndex();
+            listener.onSnapshot(id, s.lastIndex(), s.lastTerm(), true);
+        }
+        send(s.from(), new SnapshotReply(term, id, s.lastIndex(), s.round()));
+    }
+
     // ------------------------------------------------------------------ applying and reads
 
     private void applyCommitted() {
@@ -510,7 +585,17 @@ public final class RaftNode {
                 else p.future().completeExceptionally(new NotLeaderException(leaderId));
             }
         }
+        maybeSnapshot();
         serviceReads();
+    }
+
+    /** Compacts the log once enough has been applied since the last snapshot. */
+    private void maybeSnapshot() {
+        long snap = storage.snapshotIndex();
+        if (lastApplied - snap < config.snapshotThreshold()) return;
+        long t = storage.termAt(lastApplied);
+        storage.compact(lastApplied, t, stateMachine.snapshot());
+        listener.onSnapshot(id, lastApplied, t, false);
     }
 
     private void serviceReads() {

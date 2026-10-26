@@ -17,13 +17,16 @@ public class CodecTest {
                 new Message.AppendEntries(9, "n3", 10, 8,
                         List.of(new LogEntry(9, "a".getBytes()), new LogEntry(9, new byte[0])), 9, 123),
                 new Message.AppendEntries(9, "n3", 0, 0, List.of(), 0, 0),
-                new Message.AppendReply(9, "n4", false, 0, 5, 3, 77));
+                new Message.AppendReply(9, "n4", false, 0, 5, 3, 77),
+                new Message.InstallSnapshot(10, "n1", 500, 9, "image".getBytes(), 12),
+                new Message.SnapshotReply(10, "n2", 500, 12));
         for (Message m : messages) {
             byte[] wire = Codec.encode(m);
             Message back = Codec.decode(wire);
             Check.equal(m.getClass(), back.getClass(), "type");
             Check.isTrue(Arrays.equals(wire, Codec.encode(back)), "re-encoding is identical for " + m);
-            if (!(m instanceof Message.AppendEntries)) Check.equal(m, back, "fields"); // byte[] has identity equals
+            boolean hasBytes = m instanceof Message.AppendEntries || m instanceof Message.InstallSnapshot;
+            if (!hasBytes) Check.equal(m, back, "fields"); // byte[] has identity equals
         }
         Message.AppendEntries a = (Message.AppendEntries) Codec.decode(Codec.encode(messages.get(4)));
         Check.equal("a", new String(a.entries().get(0).command()), "entry payload");

@@ -12,12 +12,15 @@ import raftkv.core.LogEntry;
 import raftkv.core.Message;
 import raftkv.core.Message.AppendEntries;
 import raftkv.core.Message.AppendReply;
+import raftkv.core.Message.InstallSnapshot;
+import raftkv.core.Message.SnapshotReply;
 import raftkv.core.Message.RequestVote;
 import raftkv.core.Message.VoteReply;
 
 /** Compact binary encoding of Raft messages: a type byte followed by the fields in order. */
 public final class Codec {
-    private static final byte REQUEST_VOTE = 1, VOTE_REPLY = 2, APPEND = 3, APPEND_REPLY = 4;
+    private static final byte REQUEST_VOTE = 1, VOTE_REPLY = 2, APPEND = 3, APPEND_REPLY = 4, SNAPSHOT = 5,
+            SNAPSHOT_REPLY = 6;
 
     private Codec() {}
 
@@ -65,6 +68,23 @@ public final class Codec {
                     out.writeLong(r.conflictTerm());
                     out.writeLong(r.round());
                 }
+                case InstallSnapshot s -> {
+                    out.writeByte(SNAPSHOT);
+                    out.writeLong(s.term());
+                    out.writeUTF(s.from());
+                    out.writeLong(s.lastIndex());
+                    out.writeLong(s.lastTerm());
+                    out.writeLong(s.round());
+                    out.writeInt(s.data().length);
+                    out.write(s.data());
+                }
+                case SnapshotReply r -> {
+                    out.writeByte(SNAPSHOT_REPLY);
+                    out.writeLong(r.term());
+                    out.writeUTF(r.from());
+                    out.writeLong(r.lastIndex());
+                    out.writeLong(r.round());
+                }
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -98,6 +118,17 @@ public final class Codec {
                 }
                 case APPEND_REPLY -> new AppendReply(in.readLong(), in.readUTF(), in.readBoolean(), in.readLong(),
                         in.readLong(), in.readLong(), in.readLong());
+                case SNAPSHOT -> {
+                    long term = in.readLong();
+                    String from = in.readUTF();
+                    long lastIndex = in.readLong(), lastTerm = in.readLong(), round = in.readLong();
+                    int len = in.readInt();
+                    if (len < 0 || len > in.available()) throw new IOException("bad snapshot length");
+                    byte[] image = new byte[len];
+                    in.readFully(image);
+                    yield new InstallSnapshot(term, from, lastIndex, lastTerm, image, round);
+                }
+                case SNAPSHOT_REPLY -> new SnapshotReply(in.readLong(), in.readUTF(), in.readLong(), in.readLong());
                 default -> throw new IOException("unknown message type " + type);
             };
         } catch (IOException e) {

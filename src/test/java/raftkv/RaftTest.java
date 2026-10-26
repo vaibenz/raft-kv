@@ -4,6 +4,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import raftkv.core.NotLeaderException;
+import raftkv.core.RaftConfig;
 import raftkv.core.RaftNode;
 import raftkv.kv.KvStateMachine;
 
@@ -126,6 +127,52 @@ public class RaftTest {
             c.restart(down);
             c.awaitConvergence(5000);
             Check.equal("v1499", value(c, down, "k1499"), "lagging node caught up");
+            c.assertSafe();
+        }
+    }
+
+    private static RaftConfig snapshotEvery(int entries) {
+        RaftConfig f = RaftConfig.fast();
+        return new RaftConfig(f.electionMinMs(), f.electionMaxMs(), f.heartbeatMs(), f.maxBatch(), entries);
+    }
+
+    @Test
+    public void laggingFollowerCatchesUpFromASnapshot() {
+        try (Cluster c = new Cluster(5, 10, snapshotEvery(50))) {
+            RaftNode leader = c.awaitLeader(2000);
+            String down = c.ids.stream().filter(id -> !id.equals(leader.id())).findFirst().orElseThrow();
+            c.crash(down);
+            for (int i = 0; i < 400; i++) c.put("k" + (i % 40), "v" + i, 1, i + 1, 2000);
+            Check.isTrue(c.leader().status().snapshotIndex() > 300, "leader compacted its log");
+            c.restart(down); // the entries it needs are gone from the leader's log: it must get the snapshot
+            c.awaitConvergence(5000);
+            Check.isTrue(c.node(down).status().snapshotIndex() > 0, "follower installed a snapshot");
+            Check.equal(c.machine(leader.id()).dump(), c.machine(down).dump(), "same state as the leader");
+            Check.equal("v399", value(c, down, "k39"), "latest value");
+            c.assertSafe();
+        }
+    }
+
+    @Test
+    public void restartRestoresFromSnapshotAndReplaysTheRest() {
+        try (Cluster c = new Cluster(3, 11, snapshotEvery(25))) {
+            c.awaitLeader(2000);
+            c.put("dup", "first", 2, 1, 2000); // client 2's only write, soon buried in a snapshot
+            for (int i = 0; i < 110; i++) c.put("k" + i, "v" + i, 1, i + 1, 2000);
+            for (String id : c.ids) c.crash(id);
+            for (String id : c.ids) c.restart(id);
+            c.awaitLeader(3000);
+            c.put("after", "restart", 1, 1000, 2000);
+            c.awaitConvergence(3000);
+            for (String id : c.ids) {
+                Check.equal("v109", value(c, id, "k109"), "entry after the snapshot replayed on " + id);
+                Check.equal("v3", value(c, id, "k3"), "entry inside the snapshot restored on " + id);
+            }
+            // Client 2 retries its write (same sequence number): its session lives only in the snapshot now, and
+            // must still stop the retry from being applied a second time.
+            c.put("dup", "second", 2, 1, 2000);
+            c.awaitConvergence(3000);
+            for (String id : c.ids) Check.equal("first", value(c, id, "dup"), "deduplicated across the snapshot");
             c.assertSafe();
         }
     }

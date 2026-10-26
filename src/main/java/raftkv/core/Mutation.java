@@ -16,7 +16,9 @@ public enum Mutation {
     /** Serve ReadIndex reads without confirming leadership with a majority. */
     READ_WITHOUT_QUORUM,
     /** Followers acknowledge entries before they are durable. */
-    ACK_BEFORE_SYNC;
+    ACK_BEFORE_SYNC,
+    /** Atomic file replacement skips the directory fsync, so a rename (and the term and vote in it) can be lost. */
+    SKIP_DIR_FSYNC;
 
     private static Mutation active = parse(System.getProperty("raftkv.mutation"));
 

@@ -31,4 +31,13 @@ public sealed interface Message {
      */
     record AppendReply(long term, String from, boolean success, long matchIndex, long conflictIndex,
                        long conflictTerm, long round) implements Message {}
+
+    /**
+     * Sent instead of AppendEntries when a follower needs entries the leader has already compacted away
+     * (section 7). Carries the whole state machine image as of {@code lastIndex}.
+     */
+    record InstallSnapshot(long term, String from, long lastIndex, long lastTerm, byte[] data, long round)
+            implements Message {}
+
+    record SnapshotReply(long term, String from, long lastIndex, long round) implements Message {}
 }
