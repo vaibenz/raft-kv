@@ -18,7 +18,9 @@ public enum Mutation {
     /** Followers acknowledge entries before they are durable. */
     ACK_BEFORE_SYNC,
     /** Atomic file replacement skips the directory fsync, so a rename (and the term and vote in it) can be lost. */
-    SKIP_DIR_FSYNC;
+    SKIP_DIR_FSYNC,
+    /** The LSM commits a table to its manifest without forcing the table's own data to disk first. */
+    SKIP_SST_FSYNC;
 
     private static Mutation active = parse(System.getProperty("raftkv.mutation"));
 
