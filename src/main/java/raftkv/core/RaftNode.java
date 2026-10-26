@@ -11,12 +11,8 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import raftkv.core.Buggify.Site;
+import raftkv.core.EventLoop.Cancellable;
 import raftkv.core.Message.AppendEntries;
 import raftkv.core.Message.AppendReply;
 import raftkv.core.Message.RequestVote;
@@ -28,9 +24,11 @@ import raftkv.transport.TransportFactory;
 /**
  * One member of a Raft cluster (Ongaro and Ousterhout, "In Search of an Understandable Consensus Algorithm").
  *
- * <p><b>Threading model.</b> Every piece of Raft state is owned by a single event loop thread. Messages,
- * timers and client calls are all turned into tasks on that thread, so the protocol logic is written as
- * plain sequential code with no locks, and there is no possibility of two handlers interleaving.
+ * <p><b>Threading model.</b> Every piece of Raft state is owned by a single {@link EventLoop}. Messages,
+ * timers and client calls are all turned into tasks on that loop, so the protocol logic is written as
+ * plain sequential code with no locks, and there is no possibility of two handlers interleaving. The node
+ * reads time only from its loop and draws randomness only from the {@link Random} it is given, which is what
+ * lets the simulator run a whole cluster deterministically from one seed.
  *
  * <p>Implemented: leader election with randomized timeouts and PreVote, log replication with conflict backtracking and
  * pipelining, the commit rule for current term entries, a leader no-op on election, group commit (one fsync
@@ -61,7 +59,7 @@ public final class RaftNode {
     private final RaftConfig config;
     private final Listener listener;
     private final TransportFactory transportFactory;
-    private final ScheduledExecutorService loop;
+    private final EventLoop loop;
     private final Random random;
 
     private Transport transport;
@@ -90,11 +88,19 @@ public final class RaftNode {
     private final TreeMap<Long, PendingWrite> pendingWrites = new TreeMap<>();
     private final List<PendingRead> pendingReads = new ArrayList<>();
 
-    private ScheduledFuture<?> electionTimer;
-    private ScheduledFuture<?> heartbeatTimer;
+    private Cancellable electionTimer;
+    private Cancellable heartbeatTimer;
 
+    /** A node on its own thread with the real clock. */
     public RaftNode(String id, List<String> peers, Storage storage, StateMachine stateMachine, RaftConfig config,
                     Listener listener, TransportFactory transportFactory) {
+        this(id, peers, storage, stateMachine, config, listener, transportFactory, new ThreadEventLoop("raft-" + id),
+                new Random(id.hashCode() ^ System.nanoTime()));
+    }
+
+    /** A node driven by the given loop and random source, as the simulator does. */
+    public RaftNode(String id, List<String> peers, Storage storage, StateMachine stateMachine, RaftConfig config,
+                    Listener listener, TransportFactory transportFactory, EventLoop loop, Random random) {
         this.id = id;
         this.peers = List.copyOf(peers);
         this.storage = storage;
@@ -102,14 +108,8 @@ public final class RaftNode {
         this.config = config;
         this.listener = listener;
         this.transportFactory = transportFactory;
-        this.random = new Random(id.hashCode() ^ System.nanoTime());
-        ScheduledThreadPoolExecutor exec = new ScheduledThreadPoolExecutor(1, r -> {
-            Thread t = new Thread(r, "raft-" + id);
-            t.setDaemon(true);
-            return t;
-        });
-        exec.setRemoveOnCancelPolicy(true);
-        this.loop = exec;
+        this.loop = loop;
+        this.random = random;
         publish();
     }
 
@@ -124,12 +124,7 @@ public final class RaftNode {
     /** Stops the node abruptly, as a crash would: nothing in flight is finished. */
     public void stop() {
         running = false;
-        loop.shutdownNow();
-        try {
-            loop.awaitTermination(2, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        loop.shutdown();
         if (transport != null) transport.close();
         failPending(new NotLeaderException(null));
     }
@@ -185,23 +180,11 @@ public final class RaftNode {
     }
 
     private void run(Runnable task) {
-        try {
-            loop.execute(() -> safely(task));
-        } catch (RejectedExecutionException stopped) {
-            // node is stopped: drop, as a crashed process would
-        }
+        loop.execute(() -> safely(task)); // dropped if the node is stopped, as a crashed process would
     }
 
     private void submit(CompletableFuture<?> f, Runnable task) {
-        if (!running) {
-            f.completeExceptionally(new NotLeaderException(null));
-            return;
-        }
-        try {
-            loop.execute(() -> safely(task));
-        } catch (RejectedExecutionException stopped) {
-            f.completeExceptionally(new NotLeaderException(null));
-        }
+        if (!running || !loop.execute(() -> safely(task))) f.completeExceptionally(new NotLeaderException(null));
     }
 
     private void safely(Runnable task) {
@@ -210,7 +193,7 @@ public final class RaftNode {
             task.run();
         } catch (UncheckedIOException e) {
             System.err.println(id + ": storage failure, stopping: " + e);
-            new Thread(this::stop).start(); // fail stop: a node that cannot persist must not vote or ack
+            stop(); // fail stop: a node that cannot persist must not vote or ack
         } catch (RuntimeException e) {
             System.err.println(id + ": unexpected error: " + e);
             e.printStackTrace();
@@ -226,8 +209,8 @@ public final class RaftNode {
         transport.send(to, m);
     }
 
-    private static long now() {
-        return System.nanoTime() / 1_000_000;
+    private long now() {
+        return loop.nowMillis();
     }
 
     private int quorum() {
@@ -254,7 +237,7 @@ public final class RaftNode {
         role = Role.FOLLOWER;
         leaderId = newLeader;
         if (heartbeatTimer != null) {
-            heartbeatTimer.cancel(false);
+            heartbeatTimer.cancel();
             heartbeatTimer = null;
         }
         // In flight writes may still commit under the next leader, so clients must retry with the same
@@ -273,9 +256,9 @@ public final class RaftNode {
     // ------------------------------------------------------------------ elections
 
     private void resetElectionTimer() {
-        if (electionTimer != null) electionTimer.cancel(false);
+        if (electionTimer != null) electionTimer.cancel();
         int timeout = config.electionMinMs() + random.nextInt(config.electionMaxMs() - config.electionMinMs());
-        electionTimer = loop.schedule(() -> safely(this::startPreVote), timeout, TimeUnit.MILLISECONDS);
+        electionTimer = loop.schedule(() -> safely(this::startPreVote), timeout);
     }
 
     /**
@@ -319,7 +302,8 @@ public final class RaftNode {
         // Election restriction (section 5.4.1): only vote for a candidate whose log is at least as up to
         // date as ours, so any elected leader already holds every committed entry.
         boolean upToDate = rv.lastLogTerm() > storage.lastTerm()
-                || (rv.lastLogTerm() == storage.lastTerm() && rv.lastLogIndex() >= storage.lastIndex());
+                || (rv.lastLogTerm() == storage.lastTerm() && rv.lastLogIndex() >= storage.lastIndex())
+                || Mutation.is(Mutation.NO_ELECTION_RESTRICTION);
         if (rv.preVote()) {
             boolean leaderAlive = role == Role.LEADER || now() - lastHeardFromLeader < config.electionMinMs();
             boolean grant = rv.term() > storage.term() && upToDate && !leaderAlive;
@@ -355,7 +339,7 @@ public final class RaftNode {
         role = Role.LEADER;
         leaderId = id;
         preVoting = false;
-        if (electionTimer != null) electionTimer.cancel(false);
+        if (electionTimer != null) electionTimer.cancel();
         storage.sync();
         syncedIndex = storage.lastIndex();
         long next = storage.lastIndex() + 1;
@@ -369,7 +353,7 @@ public final class RaftNode {
         // immediately lets earlier entries commit and gives ReadIndex a current term commit to anchor on.
         appendLocal(new LogEntry(storage.term(), new byte[0]));
         heartbeatTimer = loop.scheduleAtFixedRate(() -> safely(this::heartbeat), config.heartbeatMs(),
-                config.heartbeatMs(), TimeUnit.MILLISECONDS);
+                config.heartbeatMs());
     }
 
     // ------------------------------------------------------------------ replication (leader side)
@@ -382,7 +366,8 @@ public final class RaftNode {
         }
         if (!flushScheduled) { // group commit: every write queued before the flush shares one fsync
             flushScheduled = true;
-            run(this::flush);
+            if (Buggify.fire(Site.LATE_FLUSH, 0.3)) loop.schedule(() -> safely(this::flush), 1 + random.nextInt(10));
+            else run(this::flush);
         }
     }
 
@@ -396,7 +381,7 @@ public final class RaftNode {
     }
 
     private void heartbeat() {
-        if (role != Role.LEADER) return;
+        if (role != Role.LEADER || Buggify.fire(Site.SKIPPED_HEARTBEAT, 0.3)) return;
         round++;
         for (String p : peers) sendAppend(p);
     }
@@ -404,7 +389,8 @@ public final class RaftNode {
     private void sendAppend(String peer) {
         long next = nextIndex.get(peer);
         long prev = next - 1;
-        long last = Math.min(syncedIndex, prev + config.maxBatch()); // only ship entries that are durable here
+        int batch = Buggify.fire(Site.TINY_APPEND_BATCH, 0.5) ? 1 : config.maxBatch();
+        long last = Math.min(syncedIndex, prev + batch); // only ship entries that are durable here
         List<LogEntry> entries = last >= next ? storage.slice(next, last + 1) : List.of();
         send(peer, new AppendEntries(storage.term(), id, prev, storage.termAt(prev), entries, commitIndex, round));
         // Pipelining: assume success and keep streaming. A lost or rejected batch is corrected by the reply.
@@ -443,7 +429,7 @@ public final class RaftNode {
         long term = storage.term();
         for (long n = syncedIndex; n > commitIndex; n--) {
             long t = storage.termAt(n);
-            if (t < term) break; // never commit an older term's entry by counting replicas
+            if (t < term && !Mutation.is(Mutation.COMMIT_OLD_TERM)) break; // never count replicas for old terms
             int replicas = 1;
             for (String p : peers) if (matchIndex.get(p) >= n) replicas++;
             if (replicas >= quorum()) {
@@ -494,7 +480,7 @@ public final class RaftNode {
             }
         }
         if (i < entries.size()) storage.append(entries.subList(i, entries.size()));
-        storage.sync(); // durable before we acknowledge
+        if (!Mutation.is(Mutation.ACK_BEFORE_SYNC)) storage.sync(); // durable before we acknowledge
 
         long lastNew = prev + entries.size();
         long newCommit = Math.min(ae.leaderCommit(), lastNew); // only entries known to match the leader's log
@@ -508,7 +494,12 @@ public final class RaftNode {
     // ------------------------------------------------------------------ applying and reads
 
     private void applyCommitted() {
-        while (lastApplied < commitIndex) {
+        long target = commitIndex;
+        if (target - lastApplied > 1 && Buggify.fire(Site.PARTIAL_APPLY, 0.3)) {
+            target = lastApplied + 1 + random.nextInt((int) Math.min(target - lastApplied - 1, 64));
+            run(this::applyCommitted); // the rest is applied by a later task, as a slow state machine would
+        }
+        while (lastApplied < target) {
             lastApplied++;
             LogEntry e = storage.get(lastApplied);
             byte[] result = e.isNoop() ? new byte[0] : stateMachine.apply(lastApplied, e.command());
@@ -543,12 +534,19 @@ public final class RaftNode {
             }
         }
         if (needRound) {
-            for (String p : peers) sendAppend(p);
+            if (Buggify.fire(Site.SLOW_READ_ROUND, 0.3)) {
+                loop.schedule(() -> safely(() -> {
+                    if (role == Role.LEADER) for (String p : peers) sendAppend(p);
+                }), 1 + random.nextInt(20));
+            } else {
+                for (String p : peers) sendAppend(p);
+            }
             if (peers.isEmpty()) serviceReads();
         }
     }
 
     private boolean roundConfirmed(long r) {
+        if (Mutation.is(Mutation.READ_WITHOUT_QUORUM)) return true;
         int acks = 1;
         for (String p : peers) if (ackedRound.get(p) >= r) acks++;
         return acks >= quorum();
