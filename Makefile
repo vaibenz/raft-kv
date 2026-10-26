@@ -4,7 +4,7 @@ JAVA  ?= java
 MAIN_SRC := $(shell find src/main/java -name '*.java')
 TEST_SRC := $(shell find src/test/java -name '*.java')
 
-.PHONY: build test chaos sim mutations bench jar clean
+.PHONY: build test chaos sim mutations bench lsm-bench jar clean
 
 build: out/main/.built
 
@@ -47,6 +47,9 @@ bench: out/main/.built
 	$(JAVA) -cp out/main raftkv.tools.Bench 5 64 10
 	$(JAVA) -cp out/main raftkv.tools.Bench 5 1 10
 	$(JAVA) -Draftkv.groupCommit=false -cp out/main raftkv.tools.Bench 5 64 10
+
+lsm-bench: out/main/.built
+	$(JAVA) -cp out/main raftkv.tools.LsmBench 1000000 100 200000
 
 jar: out/main/.built
 	jar --create --file raftkv.jar --main-class raftkv.kv.KvServer -C out/main .
