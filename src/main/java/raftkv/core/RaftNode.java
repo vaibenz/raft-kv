@@ -381,7 +381,14 @@ public final class RaftNode {
         listener.onLeader(id, storage.term());
         // A leader may only count replicas for entries of its own term (section 5.4.2). Appending a no-op
         // immediately lets earlier entries commit and gives ReadIndex a current term commit to anchor on.
-        appendLocal(new LogEntry(storage.term(), new byte[0]));
+        long term = storage.term();
+        if (Buggify.fire(Site.LATE_NOOP, 0.5)) { // legal: the no-op is an optimisation, not a safety rule
+            loop.schedule(() -> safely(() -> {
+                if (role == Role.LEADER && storage.term() == term) appendLocal(new LogEntry(term, new byte[0]));
+            }), 1 + random.nextInt(config.heartbeatMs() * 3));
+        } else {
+            appendLocal(new LogEntry(term, new byte[0]));
+        }
         heartbeatTimer = loop.scheduleAtFixedRate(() -> safely(this::heartbeat), config.heartbeatMs(),
                 config.heartbeatMs());
     }

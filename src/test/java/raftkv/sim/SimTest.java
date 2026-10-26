@@ -72,6 +72,11 @@ public class SimTest {
         caught(Mutation.SKIP_DIR_FSYNC, 100);
     }
 
+    @Test
+    public void catchesTablesCommittedBeforeTheyAreDurable() {
+        caught(Mutation.SKIP_SST_FSYNC, 100);
+    }
+
     // COMMIT_OLD_TERM (Figure 8) is also caught, but rarely: the leader's no-op closes most of the window, so it
-    // takes about a thousand seeds. It runs in `make mutations` rather than here.
+    // takes a few thousand seeds. It runs in `make mutations` rather than here.
 }

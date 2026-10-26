@@ -20,7 +20,7 @@ public final class Buggify {
 
     private Buggify() {}
 
-    public enum Site { TINY_APPEND_BATCH, LATE_FLUSH, SKIPPED_HEARTBEAT, PARTIAL_APPLY, SLOW_READ_ROUND }
+    public enum Site { TINY_APPEND_BATCH, LATE_FLUSH, SKIPPED_HEARTBEAT, PARTIAL_APPLY, SLOW_READ_ROUND, LATE_NOOP }
 
     /** Turns buggify on for one simulation run. Each site is enabled with probability one half. */
     public static void enable(Random r) {
