@@ -173,9 +173,9 @@ public final class KvServer implements AutoCloseable {
             RaftNode.Status s = node.status();
             String json = String.format(
                     "{\"id\":\"%s\",\"role\":\"%s\",\"term\":%d,\"leader\":%s,\"commitIndex\":%d,"
-                            + "\"lastApplied\":%d,\"lastLogIndex\":%d,\"keys\":%d}%n",
+                            + "\"lastApplied\":%d,\"lastLogIndex\":%d,\"snapshotIndex\":%d,\"keys\":%d}%n",
                     s.id(), s.role(), s.term(), s.leaderId() == null ? "null" : "\"" + s.leaderId() + "\"",
-                    s.commitIndex(), s.lastApplied(), s.lastLogIndex(), kv.size());
+                    s.commitIndex(), s.lastApplied(), s.lastLogIndex(), s.snapshotIndex(), kv.size());
             ex.getResponseHeaders().set("Content-Type", "application/json");
             reply(ex, 200, json);
         }
