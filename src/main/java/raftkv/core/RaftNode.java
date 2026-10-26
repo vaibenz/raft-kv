@@ -123,15 +123,26 @@ public final class RaftNode {
         running = true;
         transport = transportFactory.connect(id, this::receive);
         run(() -> {
-            if (storage.snapshotIndex() > 0) { // resume from the snapshot; the log after it is replayed on commit
-                stateMachine.restore(storage.snapshotData());
-                commitIndex = lastApplied = storage.snapshotIndex();
-            }
+            recover();
             resetElectionTimer();
         });
     }
 
     /** Stops the node abruptly, as a crash would: nothing in flight is finished. */
+    /**
+     * Brings the state machine and the log into line after a restart. A durable state machine may be ahead of the
+     * log's snapshot if the node crashed between the two steps of a compaction or a snapshot install (the machine
+     * always goes first); finishing the second step here makes the log start where the machine's state ends.
+     * The log after that point is replayed as it is committed.
+     */
+    private void recover() {
+        long durable = stateMachine.durableIndex();
+        if (durable > storage.snapshotIndex()) storage.installSnapshot(durable, stateMachine.durableTerm(), new byte[0]);
+        if (durable == 0 && storage.snapshotIndex() > 0)
+            stateMachine.restore(storage.snapshotData(), storage.snapshotIndex(), storage.snapshotTerm());
+        commitIndex = lastApplied = storage.snapshotIndex();
+    }
+
     public void stop() {
         running = false;
         loop.shutdown();
@@ -442,12 +453,13 @@ public final class RaftNode {
         serviceReads();
     }
 
+    /** Sends an image of the state machine as of the last applied entry, which is at or past the snapshot. */
     private void sendSnapshot(String peer) {
         long last = snapshotSentAt.getOrDefault(peer, Long.MIN_VALUE / 2);
         if (now() - last < config.electionMinMs()) return; // one is probably still in flight
         snapshotSentAt.put(peer, now());
-        send(peer, new InstallSnapshot(storage.term(), id, storage.snapshotIndex(), storage.snapshotTerm(),
-                storage.snapshotData(), round));
+        send(peer, new InstallSnapshot(storage.term(), id, lastApplied, storage.termAt(lastApplied),
+                stateMachine.snapshot(), round));
     }
 
     private void onSnapshotReply(SnapshotReply r) {
@@ -558,8 +570,10 @@ public final class RaftNode {
         lastHeardFromLeader = now();
         resetElectionTimer();
         if (s.lastIndex() > commitIndex) { // otherwise everything in it is already committed here
-            storage.installSnapshot(s.lastIndex(), s.lastTerm(), s.data()); // durable before we acknowledge
-            stateMachine.restore(s.data());
+            // The state machine first, then the log: see recover(). Both are durable before we acknowledge.
+            stateMachine.restore(s.data(), s.lastIndex(), s.lastTerm());
+            byte[] keep = stateMachine.durableIndex() > 0 ? new byte[0] : s.data();
+            storage.installSnapshot(s.lastIndex(), s.lastTerm(), keep);
             commitIndex = lastApplied = s.lastIndex();
             listener.onSnapshot(id, s.lastIndex(), s.lastTerm(), true);
         }
@@ -577,7 +591,7 @@ public final class RaftNode {
         while (lastApplied < target) {
             lastApplied++;
             LogEntry e = storage.get(lastApplied);
-            byte[] result = e.isNoop() ? new byte[0] : stateMachine.apply(lastApplied, e.command());
+            byte[] result = e.isNoop() ? new byte[0] : stateMachine.apply(lastApplied, e.term(), e.command());
             listener.onApply(id, lastApplied, e.term(), e.command());
             PendingWrite p = pendingWrites.remove(lastApplied);
             if (p != null) {
@@ -594,7 +608,7 @@ public final class RaftNode {
         long snap = storage.snapshotIndex();
         if (lastApplied - snap < config.snapshotThreshold()) return;
         long t = storage.termAt(lastApplied);
-        storage.compact(lastApplied, t, stateMachine.snapshot());
+        storage.compact(lastApplied, t, stateMachine.checkpoint(lastApplied, t));
         listener.onSnapshot(id, lastApplied, t, false);
     }
 

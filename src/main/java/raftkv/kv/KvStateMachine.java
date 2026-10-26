@@ -17,10 +17,40 @@ import raftkv.core.StateMachine;
  * recognised and the original result is returned instead of applying it twice. Together with ReadIndex this
  * gives linearizable, exactly once semantics.
  */
-public final class KvStateMachine implements StateMachine {
-    private static final byte PUT = 1, DELETE = 2, CAS = 3;
-    private static final byte[] STALE = "stale request".getBytes(StandardCharsets.UTF_8);
+public final class KvStateMachine implements StateMachine, KvStore {
+    static final byte PUT = 1, DELETE = 2, CAS = 3;
+    static final byte[] STALE = "stale request".getBytes(StandardCharsets.UTF_8);
     public static final byte[] CAS_OK = {1}, CAS_FAILED = {0};
+
+    /** A decoded command. Shared with {@link LsmStateMachine}, which applies the same commands. */
+    record Command(byte op, long clientId, long seq, String key, byte[] value, byte[] expected) {}
+
+    static Command decode(byte[] command) {
+        ByteBuffer b = ByteBuffer.wrap(command);
+        byte op = b.get();
+        long clientId = b.getLong(), seq = b.getLong();
+        byte[] k = new byte[b.getInt()];
+        b.get(k);
+        byte[] expected = null;
+        if (op == CAS) {
+            int expLen = b.getInt();
+            if (expLen >= 0) {
+                expected = new byte[expLen];
+                b.get(expected);
+            }
+        }
+        byte[] value = new byte[b.remaining()];
+        b.get(value);
+        return new Command(op, clientId, seq, new String(k, StandardCharsets.UTF_8), value, expected);
+    }
+
+    static byte[] orEmpty(byte[] v) {
+        return v == null ? new byte[0] : v;
+    }
+
+    static boolean casMatches(byte[] current, byte[] expected) {
+        return expected == null ? current == null : current != null && Arrays.equals(current, expected);
+    }
 
     private record Session(long seq, byte[] result) {}
 
@@ -55,46 +85,24 @@ public final class KvStateMachine implements StateMachine {
     }
 
     @Override
-    public byte[] apply(long index, byte[] command) {
-        ByteBuffer b = ByteBuffer.wrap(command);
-        byte op = b.get();
-        long clientId = b.getLong(), seq = b.getLong();
-        byte[] k = new byte[b.getInt()];
-        b.get(k);
-        byte[] value = new byte[b.remaining()];
-        b.get(value);
-
-        if (clientId != 0) { // clientId 0 opts out of deduplication
-            Session s = sessions.get(clientId);
-            if (s != null && seq <= s.seq()) return seq == s.seq() ? s.result() : STALE;
+    public byte[] apply(long index, long term, byte[] command) {
+        Command c = decode(command);
+        if (c.clientId() != 0) { // clientId 0 opts out of deduplication
+            Session s = sessions.get(c.clientId());
+            if (s != null && c.seq() <= s.seq()) return c.seq() == s.seq() ? s.result() : STALE;
         }
-        String key = new String(k, StandardCharsets.UTF_8);
-        byte[] result = switch (op) {
-            case PUT -> orEmpty(data.put(key, value));
-            case DELETE -> orEmpty(data.remove(key));
-            case CAS -> compareAndSet(key, value);
-            default -> throw new IllegalStateException("unknown op " + op);
+        byte[] result = switch (c.op()) {
+            case PUT -> orEmpty(data.put(c.key(), c.value()));
+            case DELETE -> orEmpty(data.remove(c.key()));
+            case CAS -> {
+                if (!casMatches(data.get(c.key()), c.expected())) yield CAS_FAILED;
+                data.put(c.key(), c.value());
+                yield CAS_OK;
+            }
+            default -> throw new IllegalStateException("unknown op " + c.op());
         };
-        if (clientId != 0) sessions.put(clientId, new Session(seq, result));
+        if (c.clientId() != 0) sessions.put(c.clientId(), new Session(c.seq(), result));
         return result;
-    }
-
-    private static byte[] orEmpty(byte[] v) {
-        return v == null ? new byte[0] : v;
-    }
-
-    private byte[] compareAndSet(String key, byte[] payload) {
-        ByteBuffer b = ByteBuffer.wrap(payload);
-        int expLen = b.getInt();
-        byte[] expected = expLen < 0 ? null : new byte[expLen];
-        if (expected != null) b.get(expected);
-        byte[] value = new byte[b.remaining()];
-        b.get(value);
-        byte[] current = data.get(key);
-        boolean matches = expected == null ? current == null : current != null && Arrays.equals(current, expected);
-        if (!matches) return CAS_FAILED;
-        data.put(key, value);
-        return CAS_OK;
     }
 
     /**
@@ -130,11 +138,16 @@ public final class KvStateMachine implements StateMachine {
     }
 
     @Override
-    public void restore(byte[] snapshot) {
+    public byte[] checkpoint(long index, long term) {
+        return snapshot(); // in memory: Raft keeps the image
+    }
+
+    @Override
+    public void restore(byte[] image, long index, long term) {
         data.clear();
         sessions.clear();
-        if (snapshot.length == 0) return;
-        ByteBuffer b = ByteBuffer.wrap(snapshot);
+        if (image.length == 0) return;
+        ByteBuffer b = ByteBuffer.wrap(image);
         for (int i = 0, n = b.getInt(); i < n; i++) {
             byte[] k = new byte[b.getInt()];
             b.get(k);
@@ -151,15 +164,18 @@ public final class KvStateMachine implements StateMachine {
     }
 
     /** Reads the local copy. Call only after {@code RaftNode.readBarrier()} for linearizable results. */
+    @Override
     public byte[] get(String key) {
         return data.get(key);
     }
 
+    @Override
     public int size() {
         return data.size();
     }
 
     /** A sorted, printable copy of the whole map, used by tests to compare replicas. */
+    @Override
     public Map<String, String> dump() {
         Map<String, String> out = new TreeMap<>();
         data.forEach((k, v) -> out.put(k, new String(v, StandardCharsets.UTF_8)));

@@ -21,6 +21,9 @@ import raftkv.core.Listener;
 import raftkv.core.NotLeaderException;
 import raftkv.core.RaftConfig;
 import raftkv.core.RaftNode;
+import raftkv.core.StateMachine;
+import raftkv.io.RealDisk;
+import raftkv.lsm.LsmStore;
 import raftkv.storage.FileStorage;
 import raftkv.transport.TcpTransport;
 
@@ -32,7 +35,8 @@ import raftkv.transport.TcpTransport;
  *      --cluster n1=127.0.0.1:7001:8001,n2=127.0.0.1:7002:8002,n3=127.0.0.1:7003:8003
  * </pre>
  *
- * Each cluster entry is {@code id=host:raftPort:httpPort}. API:
+ * Each cluster entry is {@code id=host:raftPort:httpPort}. {@code --engine lsm} (the default) keeps the data in
+ * the LSM tree under {@code data/sm}; {@code --engine memory} keeps it in a hash map and snapshots it whole. API:
  * {@code GET|PUT|DELETE /kv/{key}} and {@code GET /status}. Requests sent to a follower are redirected
  * (HTTP 307) to the leader. Optional headers {@code X-Client-Id} and {@code X-Request-Seq} make retried
  * writes exactly once.
@@ -43,21 +47,40 @@ public final class KvServer implements AutoCloseable {
     private final String id;
     private final Map<String, NodeAddress> cluster;
     private final FileStorage storage;
-    private final KvStateMachine kv = new KvStateMachine();
+    private final KvStore kv;
+    private final StateMachine machine;
     private final RaftNode node;
     private final HttpServer http;
 
     public KvServer(String id, Map<String, NodeAddress> cluster, Path dataDir, RaftConfig config) throws IOException {
+        this(id, cluster, dataDir, config, "lsm");
+    }
+
+    public KvServer(String id, Map<String, NodeAddress> cluster, Path dataDir, RaftConfig config, String engine)
+            throws IOException {
         this.id = id;
         this.cluster = cluster;
-        this.storage = new FileStorage(dataDir);
+        this.storage = new FileStorage(dataDir.resolve("raft"));
+        switch (engine) {
+            case "lsm" -> {
+                LsmStateMachine lsm = new LsmStateMachine(new RealDisk(dataDir.resolve("sm")), LsmStore.Options.defaults());
+                kv = lsm;
+                machine = lsm;
+            }
+            case "memory" -> {
+                KvStateMachine mem = new KvStateMachine();
+                kv = mem;
+                machine = mem;
+            }
+            default -> throw new IllegalArgumentException("unknown engine " + engine + " (use lsm or memory)");
+        }
         NodeAddress self = cluster.get(id);
         if (self == null) throw new IllegalArgumentException("node " + id + " is not in the cluster list");
         Map<String, InetSocketAddress> raftAddrs = new LinkedHashMap<>();
         cluster.forEach((nid, a) -> raftAddrs.put(nid, new InetSocketAddress(a.host(), a.raftPort())));
         List<String> peers = new ArrayList<>(cluster.keySet());
         peers.remove(id);
-        this.node = new RaftNode(id, peers, storage, kv, config, Listener.NONE, (nid, inbound) -> {
+        this.node = new RaftNode(id, peers, storage, machine, config, Listener.NONE, (nid, inbound) -> {
             try {
                 return new TcpTransport(nid, new InetSocketAddress(self.raftPort()), raftAddrs, inbound);
             } catch (IOException e) {
@@ -79,7 +102,7 @@ public final class KvServer implements AutoCloseable {
         return node;
     }
 
-    public KvStateMachine store() {
+    public KvStore store() {
         return kv;
     }
 
@@ -88,6 +111,13 @@ public final class KvServer implements AutoCloseable {
         http.stop(0);
         node.stop();
         storage.close();
+        if (machine instanceof AutoCloseable c) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+                // shutting down
+            }
+        }
     }
 
     // ------------------------------------------------------------------ HTTP handlers
@@ -208,11 +238,12 @@ public final class KvServer implements AutoCloseable {
         String id = opts.get("--id"), spec = opts.get("--cluster");
         if (id == null || spec == null) {
             System.err.println("usage: java -jar raftkv.jar --id n1 --cluster n1=host:raftPort:httpPort,... "
-                    + "[--data dir]");
+                    + "[--data dir] [--engine lsm|memory]");
             System.exit(2);
         }
         Path data = Path.of(opts.getOrDefault("--data", "data/" + id));
-        KvServer server = new KvServer(id, parseCluster(spec), data, RaftConfig.defaults());
+        KvServer server = new KvServer(id, parseCluster(spec), data, RaftConfig.defaults(),
+                opts.getOrDefault("--engine", "lsm"));
         Runtime.getRuntime().addShutdownHook(new Thread(server::close));
         server.start();
         NodeAddress self = server.cluster.get(id);

@@ -15,7 +15,7 @@ public record RaftConfig(int electionMinMs, int electionMaxMs, int heartbeatMs, 
     }
 
     public static RaftConfig defaults() {
-        return new RaftConfig(150, 300, 50, 512);
+        return new RaftConfig(150, 300, 50, 512, 10_000);
     }
 
     /** Shorter timeouts for in-process tests, so failover happens in tens of milliseconds. */
