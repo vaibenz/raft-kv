@@ -37,7 +37,7 @@ sim: out/test/.built
 
 # Mutation testing: each planted protocol bug must be caught by the simulator.
 mutations: out/test/.built
-	@for m in read-without-quorum ack-before-sync no-election-restriction skip-dir-fsync; do \
+	@for m in read-without-quorum ack-before-sync no-election-restriction skip-dir-fsync skip-sst-fsync; do \
 		$(JAVA) -Draftkv.mutation=$$m -Dsim.seeds=300 -cp out/main:out/test raftkv.sim.SimRunner 2>/dev/null \
 			| grep -E "mutation (caught|NOT)" | sed "s/^/$$m: /" || exit 1; done
 	@$(JAVA) -Draftkv.mutation=commit-old-term -Dsim.seeds=3000 -cp out/main:out/test raftkv.sim.SimRunner \
