@@ -4,8 +4,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -39,10 +39,16 @@ import raftkv.transport.TcpTransport;
  * the LSM tree under {@code data/sm}; {@code --engine memory} keeps it in a hash map and snapshots it whole. API:
  * {@code GET|PUT|DELETE /kv/{key}} and {@code GET /status}. Requests sent to a follower are redirected
  * (HTTP 307) to the leader. Optional headers {@code X-Client-Id} and {@code X-Request-Seq} make retried
- * writes exactly once.
+ * writes exactly once. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
  */
 public final class KvServer implements AutoCloseable {
     public record NodeAddress(String host, int raftPort, int httpPort) {}
+
+    /**
+     * Largest value a PUT may carry. Every value is a Raft log entry that is fsynced, replicated to every follower
+     * and kept until the next snapshot, so one unbounded request could stall the whole cluster or exhaust memory.
+     */
+    public static final int MAX_VALUE_BYTES = 1 << 20;
 
     private final String id;
     private final Map<String, NodeAddress> cluster;
@@ -137,8 +143,9 @@ public final class KvServer implements AutoCloseable {
     }
 
     private void serveKv(HttpExchange ex) throws IOException, TimeoutException {
-        String raw = ex.getRequestURI().getRawPath().substring("/kv/".length());
-        String key = URLDecoder.decode(raw, StandardCharsets.UTF_8);
+        // URI path decoding: "%20" is a space but "+" stays a plus. URLDecoder is for form bodies and would turn
+        // "/kv/a+b" into the key "a b".
+        String key = ex.getRequestURI().getPath().substring("/kv/".length());
         if (key.isEmpty()) {
             reply(ex, 400, "missing key\n");
             return;
@@ -153,7 +160,11 @@ public final class KvServer implements AutoCloseable {
                 else reply(ex, 200, v);
             }
             case "PUT" -> {
-                byte[] value = ex.getRequestBody().readAllBytes();
+                byte[] value = readValue(ex);
+                if (value == null) {
+                    reply(ex, 413, "value larger than " + MAX_VALUE_BYTES + " bytes\n");
+                    return;
+                }
                 await(node.propose(KvStateMachine.put(clientId, seq, key, value)), 5);
                 reply(ex, 200, "OK\n");
             }
@@ -201,6 +212,17 @@ public final class KvServer implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new TimeoutException("interrupted");
+        }
+    }
+
+    /** The request body, or null if it is over {@link #MAX_VALUE_BYTES}. Never buffers more than the cap. */
+    private static byte[] readValue(HttpExchange ex) throws IOException {
+        String declared = ex.getRequestHeaders().getFirst("Content-Length");
+        if (declared != null && declared.length() > 10) return null; // reject before reading a byte
+        if (declared != null && Long.parseLong(declared) > MAX_VALUE_BYTES) return null;
+        try (InputStream in = ex.getRequestBody()) {
+            byte[] value = in.readNBytes(MAX_VALUE_BYTES + 1); // chunked bodies declare no length
+            return value.length > MAX_VALUE_BYTES ? null : value;
         }
     }
 

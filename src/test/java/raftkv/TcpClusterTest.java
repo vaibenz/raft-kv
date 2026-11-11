@@ -63,6 +63,19 @@ public class TcpClusterTest {
             Check.equal(200, r.statusCode(), "linearizable read");
             Check.equal("hello", r.body(), "read value");
             Check.equal(404, call("GET", leaderPort, "/kv/missing", null).statusCode(), "missing key");
+
+            // Keys are decoded as URI paths: %20 is a space, but a plus sign stays a plus sign.
+            Check.equal(200, call("PUT", leaderPort, "/kv/a+b", "plus").statusCode(), "put a+b");
+            Check.equal(200, call("PUT", leaderPort, "/kv/a%20b", "space").statusCode(), "put a%20b");
+            Check.equal("plus", call("GET", leaderPort, "/kv/a+b", null).body(), "a+b is its own key");
+            Check.equal("space", call("GET", leaderPort, "/kv/a%20b", null).body(), "a%20b is the key 'a b'");
+            Check.equal("space", new String(servers.get(leader).store().get("a b")), "decoded key in the store");
+
+            // Values are capped, so one request cannot put an unbounded entry in the replicated log.
+            String atCap = "x".repeat(KvServer.MAX_VALUE_BYTES);
+            Check.equal(200, call("PUT", leaderPort, "/kv/big", atCap).statusCode(), "value at the cap");
+            Check.equal(413, call("PUT", leaderPort, "/kv/big", atCap + "x").statusCode(), "value over the cap");
+            Check.equal(atCap.length(), call("GET", leaderPort, "/kv/big", null).body().length(), "big value kept");
             Check.isTrue(call("GET", followerPort, "/status", null).body().contains("\"role\":\"FOLLOWER\""),
                     "status endpoint");
 
