@@ -35,6 +35,12 @@ public class KvStateMachineTest {
         Check.equal("", new String(r), "duplicate returns the original result");
         kv.apply(4, 1, KvStateMachine.put(42, 2, "k", b("second")));
         Check.equal("second", new String(kv.get("k")), "next sequence number is applied");
+        Check.isTrue(KvStateMachine.isStale(kv.apply(5, 1, KvStateMachine.put(42, 1, "k", b("old")))), "older seq");
+        Check.equal("second", new String(kv.get("k")), "stale write not applied");
+        Check.isTrue(!KvStateMachine.isStale(kv.apply(6, 1, KvStateMachine.put(0, 0, "s", b("stale request")))),
+                "a value that happens to read 'stale request' is not a stale marker");
+        Check.isTrue(!KvStateMachine.isStale(kv.apply(7, 1, KvStateMachine.put(0, 0, "s", b("x")))),
+                "previous value 'stale request' is returned, not taken for a stale marker");
     }
 
     @Test

@@ -27,7 +27,13 @@ public class TcpClusterTest {
     private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
 
     private HttpResponse<String> call(String method, int port, String path, String body) throws Exception {
+        return call(method, port, path, body, 0, 0);
+    }
+
+    private HttpResponse<String> call(String method, int port, String path, String body, long client, long seq)
+            throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path));
+        if (client != 0) b.header("X-Client-Id", Long.toString(client)).header("X-Request-Seq", Long.toString(seq));
         b.method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body));
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
@@ -68,6 +74,13 @@ public class TcpClusterTest {
             Check.equal(200, call("PUT", leaderPort, "/kv/empty", "").statusCode(), "put an empty value");
             Check.equal(200, call("DELETE", leaderPort, "/kv/empty", null).statusCode(), "delete an empty value");
             Check.equal(404, call("DELETE", leaderPort, "/kv/empty", null).statusCode(), "delete it again");
+
+            // Exactly once writes: a retry of the latest write is fine, an older write is refused, not acked.
+            Check.equal(200, call("PUT", leaderPort, "/kv/seq", "five", 77, 5).statusCode(), "seq 5");
+            Check.equal(200, call("PUT", leaderPort, "/kv/seq", "five", 77, 5).statusCode(), "retry of seq 5");
+            Check.equal(409, call("PUT", leaderPort, "/kv/seq", "four", 77, 4).statusCode(), "older seq 4");
+            Check.equal(409, call("DELETE", leaderPort, "/kv/seq", null, 77, 3).statusCode(), "older delete");
+            Check.equal("five", call("GET", leaderPort, "/kv/seq", null).body(), "stale writes changed nothing");
 
             // Keys are decoded as URI paths: %20 is a space, but a plus sign stays a plus sign.
             Check.equal(200, call("PUT", leaderPort, "/kv/a+b", "plus").statusCode(), "put a+b");

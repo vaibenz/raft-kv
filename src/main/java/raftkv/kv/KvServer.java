@@ -39,7 +39,7 @@ import raftkv.transport.TcpTransport;
  * the LSM tree under {@code data/sm}; {@code --engine memory} keeps it in a hash map and snapshots it whole. API:
  * {@code GET|PUT|DELETE /kv/{key}} and {@code GET /status}. Requests sent to a follower are redirected
  * (HTTP 307) to the leader. Optional headers {@code X-Client-Id} and {@code X-Request-Seq} make retried
- * writes exactly once. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
+ * writes exactly once; a write older than the client's latest applied one gets 409. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
  */
 public final class KvServer implements AutoCloseable {
     public record NodeAddress(String host, int raftPort, int httpPort) {}
@@ -165,11 +165,16 @@ public final class KvServer implements AutoCloseable {
                     reply(ex, 413, "value larger than " + MAX_VALUE_BYTES + " bytes\n");
                     return;
                 }
-                await(node.propose(KvStateMachine.put(clientId, seq, key, value)), 5);
-                reply(ex, 200, "OK\n");
+                byte[] r = await(node.propose(KvStateMachine.put(clientId, seq, key, value)), 5);
+                if (KvStateMachine.isStale(r)) replyStale(ex);
+                else reply(ex, 200, "OK\n");
             }
             case "DELETE" -> {
                 byte[] r = await(node.propose(KvStateMachine.delete(clientId, seq, key)), 5);
+                if (KvStateMachine.isStale(r)) {
+                    replyStale(ex);
+                    return;
+                }
                 boolean deleted = r.length > 0; // KvStateMachine.DELETED, or empty if the key was absent
                 reply(ex, deleted ? 200 : 404, deleted ? "deleted\n" : "not found\n");
             }
@@ -178,6 +183,14 @@ public final class KvServer implements AutoCloseable {
                 reply(ex, 405, "method not allowed\n");
             }
         }
+    }
+
+    /**
+     * The client already had a write with a higher X-Request-Seq applied, so this older one was skipped. Saying 200
+     * here would tell the client a write took effect when it did not.
+     */
+    private static void replyStale(HttpExchange ex) throws IOException {
+        reply(ex, 409, "stale request: a newer X-Request-Seq from this client was already applied\n");
     }
 
     private void handleStatus(HttpExchange ex) throws IOException {

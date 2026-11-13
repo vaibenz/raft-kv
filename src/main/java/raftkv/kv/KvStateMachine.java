@@ -20,6 +20,14 @@ import raftkv.core.StateMachine;
 public final class KvStateMachine implements StateMachine, KvStore {
     static final byte PUT = 1, DELETE = 2, CAS = 3;
     static final byte[] STALE = "stale request".getBytes(StandardCharsets.UTF_8);
+
+    /**
+     * True if a command was not applied because its client had already sent a newer sequence number. Compared by
+     * identity: a PUT returns the previous value, which could hold the same bytes as {@link #STALE}.
+     */
+    public static boolean isStale(byte[] result) {
+        return result == STALE;
+    }
     public static final byte[] CAS_OK = {1}, CAS_FAILED = {0};
     /**
      * Result of a DELETE: {@link #DELETED} if the key was there, empty if it was not. Not the old value, which
