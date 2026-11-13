@@ -169,8 +169,9 @@ public final class KvServer implements AutoCloseable {
                 reply(ex, 200, "OK\n");
             }
             case "DELETE" -> {
-                byte[] prev = await(node.propose(KvStateMachine.delete(clientId, seq, key)), 5);
-                reply(ex, prev.length == 0 ? 404 : 200, prev.length == 0 ? "not found\n" : "deleted\n");
+                byte[] r = await(node.propose(KvStateMachine.delete(clientId, seq, key)), 5);
+                boolean deleted = r.length > 0; // KvStateMachine.DELETED, or empty if the key was absent
+                reply(ex, deleted ? 200 : 404, deleted ? "deleted\n" : "not found\n");
             }
             default -> {
                 ex.getResponseHeaders().set("Allow", "GET, PUT, DELETE");

@@ -83,8 +83,9 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
                 yield KvStateMachine.orEmpty(current);
             }
             case KvStateMachine.DELETE -> {
-                if (current != null) store.delete(key);
-                yield KvStateMachine.orEmpty(current);
+                if (current == null) yield new byte[0];
+                store.delete(key);
+                yield KvStateMachine.DELETED;
             }
             case KvStateMachine.CAS -> {
                 if (!KvStateMachine.casMatches(current, c.expected())) yield KvStateMachine.CAS_FAILED;

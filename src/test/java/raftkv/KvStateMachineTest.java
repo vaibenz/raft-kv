@@ -1,7 +1,14 @@
 package raftkv;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import raftkv.core.StateMachine;
+import raftkv.io.RealDisk;
 import raftkv.kv.KvStateMachine;
+import raftkv.kv.KvStore;
+import raftkv.kv.LsmStateMachine;
+import raftkv.lsm.LsmStore;
 
 public class KvStateMachineTest {
     private static byte[] b(String s) { return s.getBytes(StandardCharsets.UTF_8); }
@@ -40,5 +47,27 @@ public class KvStateMachineTest {
         Check.isTrue(kv.apply(4, 1, KvStateMachine.cas(0, 0, "k", b("a"), b("")))[0] == 1, "a -> empty value");
         Check.equal("", new String(kv.get("k")), "empty value is present, not absent");
         Check.isTrue(kv.apply(5, 1, KvStateMachine.cas(0, 0, "k", null, b("c")))[0] == 0, "empty is not absent");
+    }
+
+    /** A DELETE must report "deleted" for a key that holds an empty value, on both engines. */
+    @Test
+    public void deleteOfAnEmptyValueIsReportedAsDeleted() throws IOException {
+        checkDeleteResults(new KvStateMachine());
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.defaults())) {
+            checkDeleteResults(lsm);
+        }
+    }
+
+    private static <M extends StateMachine & KvStore> void checkDeleteResults(M kv) {
+        kv.apply(1, 1, KvStateMachine.put(0, 0, "empty", new byte[0]));
+        Check.isTrue(kv.get("empty") != null, "an empty value is present");
+        Check.isTrue(kv.apply(2, 1, KvStateMachine.delete(0, 0, "empty")).length > 0, "deleting it is reported");
+        Check.isTrue(kv.get("empty") == null, "and it is gone");
+        Check.equal(0, kv.apply(3, 1, KvStateMachine.delete(0, 0, "empty")).length, "a second delete finds nothing");
+        // A retried delete gets the original answer, even though the key is gone by then.
+        kv.apply(4, 1, KvStateMachine.put(0, 0, "k", b("v")));
+        Check.isTrue(kv.apply(5, 1, KvStateMachine.delete(9, 1, "k")).length > 0, "delete k");
+        Check.isTrue(kv.apply(6, 1, KvStateMachine.delete(9, 1, "k")).length > 0, "retry gets the same answer");
     }
 }

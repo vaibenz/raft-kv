@@ -64,6 +64,11 @@ public class TcpClusterTest {
             Check.equal("hello", r.body(), "read value");
             Check.equal(404, call("GET", leaderPort, "/kv/missing", null).statusCode(), "missing key");
 
+            // DELETE says whether the key was there, also when its value is empty.
+            Check.equal(200, call("PUT", leaderPort, "/kv/empty", "").statusCode(), "put an empty value");
+            Check.equal(200, call("DELETE", leaderPort, "/kv/empty", null).statusCode(), "delete an empty value");
+            Check.equal(404, call("DELETE", leaderPort, "/kv/empty", null).statusCode(), "delete it again");
+
             // Keys are decoded as URI paths: %20 is a space, but a plus sign stays a plus sign.
             Check.equal(200, call("PUT", leaderPort, "/kv/a+b", "plus").statusCode(), "put a+b");
             Check.equal(200, call("PUT", leaderPort, "/kv/a%20b", "space").statusCode(), "put a%20b");

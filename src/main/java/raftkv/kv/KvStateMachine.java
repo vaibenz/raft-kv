@@ -21,6 +21,11 @@ public final class KvStateMachine implements StateMachine, KvStore {
     static final byte PUT = 1, DELETE = 2, CAS = 3;
     static final byte[] STALE = "stale request".getBytes(StandardCharsets.UTF_8);
     public static final byte[] CAS_OK = {1}, CAS_FAILED = {0};
+    /**
+     * Result of a DELETE: {@link #DELETED} if the key was there, empty if it was not. Not the old value, which
+     * could itself be empty and would make "deleted an empty value" look like "nothing to delete".
+     */
+    public static final byte[] DELETED = {1};
 
     /** A decoded command. Shared with {@link LsmStateMachine}, which applies the same commands. */
     record Command(byte op, long clientId, long seq, String key, byte[] value, byte[] expected) {}
@@ -93,7 +98,7 @@ public final class KvStateMachine implements StateMachine, KvStore {
         }
         byte[] result = switch (c.op()) {
             case PUT -> orEmpty(data.put(c.key(), c.value()));
-            case DELETE -> orEmpty(data.remove(c.key()));
+            case DELETE -> data.remove(c.key()) != null ? DELETED : new byte[0];
             case CAS -> {
                 if (!casMatches(data.get(c.key()), c.expected())) yield CAS_FAILED;
                 data.put(c.key(), c.value());
