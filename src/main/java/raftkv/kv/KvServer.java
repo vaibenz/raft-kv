@@ -215,14 +215,37 @@ public final class KvServer implements AutoCloseable {
         }
     }
 
+    /**
+     * How much of an oversized body is read and thrown away before the 413 goes out. Answering with the body still
+     * unread makes the HTTP server close the connection with the client's bytes in its receive buffer, which sends
+     * a TCP reset, and the reset can destroy the 413 before the client reads it: the client sees a broken
+     * connection instead of a clear answer. Bodies beyond this are not worth reading; those connections just close.
+     */
+    static final long MAX_DRAIN_BYTES = 16L << 20;
+
     /** The request body, or null if it is over {@link #MAX_VALUE_BYTES}. Never buffers more than the cap. */
     private static byte[] readValue(HttpExchange ex) throws IOException {
         String declared = ex.getRequestHeaders().getFirst("Content-Length");
-        if (declared != null && declared.length() > 10) return null; // reject before reading a byte
-        if (declared != null && Long.parseLong(declared) > MAX_VALUE_BYTES) return null;
+        long length = declared == null ? -1 : declared.length() > 18 ? Long.MAX_VALUE : Long.parseLong(declared);
         try (InputStream in = ex.getRequestBody()) {
+            if (length > MAX_VALUE_BYTES) { // over the cap before reading a byte
+                if (length <= MAX_VALUE_BYTES + MAX_DRAIN_BYTES) discard(in, length);
+                return null;
+            }
             byte[] value = in.readNBytes(MAX_VALUE_BYTES + 1); // chunked bodies declare no length
-            return value.length > MAX_VALUE_BYTES ? null : value;
+            if (value.length <= MAX_VALUE_BYTES) return value;
+            discard(in, MAX_DRAIN_BYTES);
+            return null;
+        }
+    }
+
+    /** Reads and drops up to limit bytes, through a small buffer, so nothing large is ever held in memory. */
+    private static void discard(InputStream in, long limit) throws IOException {
+        byte[] buf = new byte[64 * 1024];
+        for (long left = limit; left > 0; ) {
+            int n = in.read(buf, 0, (int) Math.min(buf.length, left));
+            if (n < 0) return;
+            left -= n;
         }
     }
 

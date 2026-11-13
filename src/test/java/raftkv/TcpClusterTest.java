@@ -74,7 +74,9 @@ public class TcpClusterTest {
             // Values are capped, so one request cannot put an unbounded entry in the replicated log.
             String atCap = "x".repeat(KvServer.MAX_VALUE_BYTES);
             Check.equal(200, call("PUT", leaderPort, "/kv/big", atCap).statusCode(), "value at the cap");
-            Check.equal(413, call("PUT", leaderPort, "/kv/big", atCap + "x").statusCode(), "value over the cap");
+            // The 413 must reach the client every time, not be lost to a reset because the body went unread.
+            for (int i = 0; i < 20; i++)
+                Check.equal(413, call("PUT", leaderPort, "/kv/big", atCap + "x").statusCode(), "value over the cap");
             Check.equal(atCap.length(), call("GET", leaderPort, "/kv/big", null).body().length(), "big value kept");
             Check.isTrue(call("GET", followerPort, "/status", null).body().contains("\"role\":\"FOLLOWER\""),
                     "status endpoint");
