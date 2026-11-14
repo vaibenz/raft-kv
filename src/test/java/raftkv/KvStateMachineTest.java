@@ -76,4 +76,45 @@ public class KvStateMachineTest {
         Check.isTrue(kv.apply(5, 1, KvStateMachine.delete(9, 1, "k")).length > 0, "delete k");
         Check.isTrue(kv.apply(6, 1, KvStateMachine.delete(9, 1, "k")).length > 0, "retry gets the same answer");
     }
+
+    /**
+     * Client sessions travel with the snapshot. A follower that catches up through InstallSnapshot, or a node that
+     * restarts from one, must still recognise a retry of a write the snapshot already holds; otherwise the retry is
+     * applied a second time and can overwrite a newer value.
+     */
+    @Test
+    public void retriesAreRecognisedAfterSnapshotRestore() throws IOException {
+        KvStateMachine mem = new KvStateMachine();
+        fillForSnapshot(mem);
+        KvStateMachine memCopy = new KvStateMachine();
+        memCopy.restore(mem.snapshot(), 3, 1);
+        checkRestoredSessions(memCopy);
+
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.defaults());
+             LsmStateMachine lsmCopy = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.defaults())) {
+            fillForSnapshot(lsm);
+            lsmCopy.restore(lsm.snapshot(), 3, 1);
+            checkRestoredSessions(lsmCopy);
+        }
+    }
+
+    private static void fillForSnapshot(StateMachine kv) {
+        kv.apply(1, 1, KvStateMachine.put(42, 1, "k", b("first")));
+        kv.apply(2, 1, KvStateMachine.put(7, 1, "k", b("other client")));
+        kv.apply(3, 1, KvStateMachine.put(42, 2, "j", b("j1")));
+    }
+
+    private static <M extends StateMachine & KvStore> void checkRestoredSessions(M kv) {
+        Check.equal("other client", new String(kv.get("k")), "data restored");
+        byte[] r = kv.apply(4, 1, KvStateMachine.put(42, 2, "j", b("j1")));
+        Check.isTrue(!KvStateMachine.isStale(r), "retry of the latest write is not stale");
+        Check.equal("", new String(r), "retry gets the original result");
+        Check.isTrue(KvStateMachine.isStale(kv.apply(5, 1, KvStateMachine.put(42, 1, "k", b("first")))),
+                "an older write from a restored session is stale");
+        Check.equal("other client", new String(kv.get("k")), "and is not applied again");
+        kv.apply(6, 1, KvStateMachine.put(42, 3, "k", b("third")));
+        Check.equal("third", new String(kv.get("k")), "the next sequence number still applies");
+    }
 }
