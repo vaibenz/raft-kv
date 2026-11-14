@@ -39,7 +39,7 @@ import raftkv.transport.TcpTransport;
  * the LSM tree under {@code data/sm}; {@code --engine memory} keeps it in a hash map and snapshots it whole. API:
  * {@code GET|PUT|DELETE /kv/{key}} and {@code GET /status}. Requests sent to a follower are redirected
  * (HTTP 307) to the leader. Optional headers {@code X-Client-Id} and {@code X-Request-Seq} make retried
- * writes exactly once; a write older than the client's latest applied one gets 409. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
+ * writes exactly once (a client id without a positive sequence number gets 400); a write older than the client's latest applied one gets 409. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
  */
 public final class KvServer implements AutoCloseable {
     public record NodeAddress(String host, int raftPort, int httpPort) {}
@@ -152,6 +152,12 @@ public final class KvServer implements AutoCloseable {
         }
         long clientId = header(ex, "X-Client-Id", 0);
         long seq = header(ex, "X-Request-Seq", 0);
+        if (clientId != 0 && seq <= 0) {
+            // Without a sequence number every write would carry seq 0, so each one after the first looks like a
+            // retry of it: it is skipped and still answered 200.
+            reply(ex, 400, "X-Client-Id needs a positive X-Request-Seq\n");
+            return;
+        }
         switch (ex.getRequestMethod()) {
             case "GET" -> {
                 await(node.readBarrier(), 3);

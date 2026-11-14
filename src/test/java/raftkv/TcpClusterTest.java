@@ -81,6 +81,14 @@ public class TcpClusterTest {
             Check.equal(409, call("PUT", leaderPort, "/kv/seq", "four", 77, 4).statusCode(), "older seq 4");
             Check.equal(409, call("DELETE", leaderPort, "/kv/seq", null, 77, 3).statusCode(), "older delete");
             Check.equal("five", call("GET", leaderPort, "/kv/seq", null).body(), "stale writes changed nothing");
+            // A client id with no sequence number would make every write after the first a "retry" of it, skipped
+            // but answered 200. It is refused instead, and so is a sequence number that is not positive.
+            HttpRequest noSeq = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + leaderPort + "/kv/noseq"))
+                    .header("X-Client-Id", "88").PUT(HttpRequest.BodyPublishers.ofString("a")).build();
+            Check.equal(400, http.send(noSeq, HttpResponse.BodyHandlers.ofString()).statusCode(), "client id, no seq");
+            Check.equal(400, call("PUT", leaderPort, "/kv/noseq", "b", 88, 0).statusCode(), "seq 0");
+            Check.equal(400, call("PUT", leaderPort, "/kv/noseq", "b", 88, -1).statusCode(), "negative seq");
+            Check.equal(404, call("GET", leaderPort, "/kv/noseq", null).statusCode(), "refused writes changed nothing");
 
             // Keys are decoded as URI paths: %20 is a space, but a plus sign stays a plus sign.
             Check.equal(200, call("PUT", leaderPort, "/kv/a+b", "plus").statusCode(), "put a+b");
