@@ -42,12 +42,19 @@ record Manifest(long appliedIndex, long appliedTerm, long nextFileId, List<SsTab
     static Manifest load(Disk disk) throws IOException {
         if (!disk.exists(FILE)) return empty();
         byte[] data = disk.readAll(FILE);
+        // Check the checksum before trusting any field: a damaged table count must not size an allocation.
+        if (data.length < 4 + 8 + 8 + 8 + 4 + 4) throw new IOException("truncated manifest");
+        int body = data.length - 4;
+        if (ByteBuffer.wrap(data, body, 4).getInt() != SsTable.crc(data, 0, body)) {
+            throw new IOException("manifest checksum mismatch");
+        }
         try {
-            ByteBuffer b = ByteBuffer.wrap(data);
+            ByteBuffer b = ByteBuffer.wrap(data, 0, body);
             if (b.getInt() != MAGIC) throw new IOException("bad manifest magic");
             long index = b.getLong(), term = b.getLong(), next = b.getLong();
             int n = b.getInt();
-            List<SsTable.Meta> tables = new ArrayList<>(n);
+            if (n < 0) throw new IOException("negative table count in manifest");
+            List<SsTable.Meta> tables = new ArrayList<>(Math.min(n, 1024));
             for (int i = 0; i < n; i++) {
                 long id = b.getLong();
                 int level = b.getInt();
@@ -58,8 +65,7 @@ record Manifest(long appliedIndex, long appliedTerm, long nextFileId, List<SsTab
                 b.get(largest);
                 tables.add(new SsTable.Meta(id, level, size, smallest, largest, b.getLong()));
             }
-            int stored = b.getInt();
-            if (stored != SsTable.crc(data, 0, b.position() - 4)) throw new IOException("manifest checksum mismatch");
+            if (b.hasRemaining()) throw new IOException("trailing bytes in manifest");
             return new Manifest(index, term, next, List.copyOf(tables));
         } catch (BufferUnderflowException | NegativeArraySizeException e) {
             throw new IOException("truncated manifest", e);

@@ -138,6 +138,39 @@ public class LsmStoreTest {
         reopened.close();
     }
 
+    /**
+     * A damaged table count must be reported as a corrupt manifest. It used to be trusted before the checksum was
+     * checked, so a negative count escaped as IllegalArgumentException and a huge one tried to allocate gigabytes.
+     */
+    @Test
+    public void corruptManifestCountIsDetectedBeforeAllocating() throws IOException {
+        Path dir = Files.createTempDirectory("lsm");
+        RealDisk disk = new RealDisk(dir);
+        new Manifest(5, 2, 3, List.of(new SsTable.Meta(1, 0, 100, b("a"), b("z"), 10))).save(disk);
+        byte[] good = Files.readAllBytes(dir.resolve(Manifest.FILE));
+        Check.equal(1, Manifest.load(disk).tables().size(), "intact manifest loads");
+        int countOffset = 4 + 8 + 8 + 8;
+        for (int bad : new int[] {-1, Integer.MAX_VALUE, 1 << 20}) {
+            byte[] data = good.clone();
+            java.nio.ByteBuffer.wrap(data).putInt(countOffset, bad);
+            Files.write(dir.resolve(Manifest.FILE), data);
+            try {
+                Manifest.load(disk);
+                throw new AssertionError("manifest with table count " + bad + " was accepted");
+            } catch (IOException expected) {
+                // ok
+            }
+        }
+        byte[] longer = Arrays.copyOf(good, good.length + 1);
+        Files.write(dir.resolve(Manifest.FILE), longer);
+        try {
+            Manifest.load(disk);
+            throw new AssertionError("manifest with a trailing byte was accepted");
+        } catch (IOException expected) {
+            // ok
+        }
+    }
+
     @Test
     public void restoreReplacesEverythingAtomically() throws IOException {
         Path dir = Files.createTempDirectory("lsm");
