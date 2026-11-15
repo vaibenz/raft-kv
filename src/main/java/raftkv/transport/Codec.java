@@ -95,7 +95,7 @@ public final class Codec {
     public static Message decode(byte[] data) {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(data))) {
             byte type = in.readByte();
-            return switch (type) {
+            Message m = switch (type) {
                 case REQUEST_VOTE -> new RequestVote(in.readLong(), in.readUTF(), in.readLong(), in.readLong(),
                         in.readBoolean());
                 case VOTE_REPLY -> new VoteReply(in.readLong(), in.readUTF(), in.readBoolean(), in.readBoolean());
@@ -131,6 +131,9 @@ public final class Codec {
                 case SNAPSHOT_REPLY -> new SnapshotReply(in.readLong(), in.readUTF(), in.readLong(), in.readLong());
                 default -> throw new IOException("unknown message type " + type);
             };
+            // Leftover bytes mean the two ends disagree on the format: refuse rather than drop a field silently.
+            if (in.available() != 0) throw new IOException(in.available() + " trailing bytes after message type " + type);
+            return m;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

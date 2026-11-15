@@ -42,4 +42,35 @@ public class CodecTest {
             // ok
         }
     }
+
+    /**
+     * Every strict prefix of a valid frame is truncated and must be refused, and so must a frame with a byte left
+     * over: that means the two ends disagree on the format, and the leftover field would be silently dropped.
+     */
+    @Test
+    public void rejectsTruncatedAndOverlongFrames() {
+        List<Message> messages = List.of(
+                new Message.RequestVote(7, "n1", 42, 6, true),
+                new Message.VoteReply(7, "n2", true, false),
+                new Message.AppendEntries(9, "n3", 10, 8, List.of(new LogEntry(9, "abc".getBytes())), 9, 123),
+                new Message.AppendReply(9, "n4", false, 0, 5, 3, 77),
+                new Message.InstallSnapshot(10, "n1", 500, 9, "image".getBytes(), 12),
+                new Message.SnapshotReply(10, "n2", 500, 12));
+        for (Message m : messages) {
+            byte[] wire = Codec.encode(m);
+            for (int len = 0; len < wire.length; len++) {
+                expectRejected(Arrays.copyOf(wire, len), m.getClass().getSimpleName() + " cut to " + len + " bytes");
+            }
+            expectRejected(Arrays.copyOf(wire, wire.length + 1), m.getClass().getSimpleName() + " with a trailing byte");
+        }
+    }
+
+    private static void expectRejected(byte[] frame, String what) {
+        try {
+            Codec.decode(frame);
+        } catch (RuntimeException expected) {
+            return;
+        }
+        throw new AssertionError(what + " was accepted");
+    }
 }
