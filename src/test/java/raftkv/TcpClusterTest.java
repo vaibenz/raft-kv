@@ -24,6 +24,24 @@ public class TcpClusterTest {
         }
     }
 
+    @Test
+    public void parsesTheClusterListAndRefusesMistakes() {
+        Map<String, NodeAddress> m = KvServer.parseCluster("n1=127.0.0.1:7001:8001, n2=10.0.0.2:7002:8002");
+        Check.equal(java.util.List.of("n1", "n2"), java.util.List.copyOf(m.keySet()), "ids in order");
+        Check.equal(new NodeAddress("10.0.0.2", 7002, 8002), m.get("n2"), "second node");
+        for (String bad : new String[] {
+                "n1=a:1:2,n2=b:3:4,n2=c:5:6", // a repeated id would silently replace the earlier node
+                "n1=a:7001", "n1", "=a:1:2", "n1=:1:2", "n1=a:1:2:3",
+                "n1=a:x:2", "n1=a:0:2", "n1=a:1:70000", "n1=a:7001:7001"}) {
+            try {
+                KvServer.parseCluster(bad);
+                throw new AssertionError("accepted " + bad);
+            } catch (IllegalArgumentException expected) {
+                Check.isTrue(expected.getMessage() != null && !expected.getMessage().isEmpty(), "message for " + bad);
+            }
+        }
+    }
+
     private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
 
     private HttpResponse<String> call(String method, int port, String path, String body) throws Exception {

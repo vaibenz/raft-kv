@@ -287,14 +287,40 @@ public final class KvServer implements AutoCloseable {
 
     // ------------------------------------------------------------------ command line
 
+    /**
+     * Parses {@code id=host:raftPort:httpPort,...}. Every node must be started with the same list, so a mistake
+     * here is refused with a message rather than tolerated: a repeated id used to overwrite the earlier entry,
+     * which quietly shrinks the cluster and changes what a majority is, and a short entry failed with an
+     * ArrayIndexOutOfBoundsException.
+     */
     public static Map<String, NodeAddress> parseCluster(String spec) {
         Map<String, NodeAddress> m = new LinkedHashMap<>();
         for (String part : spec.split(",")) {
-            String[] kv = part.trim().split("=", 2);
-            String[] hp = kv[1].split(":");
-            m.put(kv[0], new NodeAddress(hp[0], Integer.parseInt(hp[1]), Integer.parseInt(hp[2])));
+            String entry = part.trim();
+            String[] kv = entry.split("=", 2);
+            String[] hp = kv.length == 2 ? kv[1].split(":", -1) : new String[0];
+            if (kv[0].isEmpty() || hp.length != 3 || hp[0].isEmpty()) {
+                throw new IllegalArgumentException("bad cluster entry '" + entry + "', want id=host:raftPort:httpPort");
+            }
+            NodeAddress a = new NodeAddress(hp[0], port(hp[1], entry), port(hp[2], entry));
+            if (a.raftPort() == a.httpPort()) {
+                throw new IllegalArgumentException("node " + kv[0] + " uses port " + a.raftPort() + " for both Raft and HTTP");
+            }
+            if (m.putIfAbsent(kv[0], a) != null) {
+                throw new IllegalArgumentException("node " + kv[0] + " is listed twice in the cluster");
+            }
         }
         return m;
+    }
+
+    private static int port(String s, String entry) {
+        try {
+            int p = Integer.parseInt(s);
+            if (p >= 1 && p <= 65535) return p;
+        } catch (NumberFormatException ignored) {
+            // reported below
+        }
+        throw new IllegalArgumentException("bad port '" + s + "' in cluster entry '" + entry + "'");
     }
 
     public static void main(String[] args) throws Exception {
