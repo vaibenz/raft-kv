@@ -42,6 +42,26 @@ public class TcpClusterTest {
         }
     }
 
+    @Test
+    public void refusesUnknownOrIncompleteOptions() {
+        Map<String, String> ok = KvServer.parseOptions(new String[] {"--id", "n1", "--cluster", "n1=a:1:2", "--data", "d"});
+        Check.equal("d", ok.get("--data"), "data dir");
+        for (String[] bad : new String[][] {
+                {"--id", "n1", "--cluster", "n1=a:1:2", "--date", "/mnt/n1"}, // a typo used to mean the default dir
+                {"--id", "n1", "--cluster", "n1=a:1:2", "--data"},
+                {"--id", "n1", "--cluster", "n1=a:1:2", "--data", ""},
+                {"--id", "n1", "--id", "n2", "--cluster", "n1=a:1:2"},
+                {"--cluster", "n1=a:1:2"},
+                {"n1", "--id", "--cluster", "n1=a:1:2"}}) {
+            try {
+                KvServer.parseOptions(bad);
+                throw new AssertionError("accepted " + String.join(" ", bad));
+            } catch (IllegalArgumentException expected) {
+                Check.isTrue(expected.getMessage() != null && !expected.getMessage().isEmpty(), "message");
+            }
+        }
+    }
+
     private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
 
     private HttpResponse<String> call(String method, int port, String path, String body) throws Exception {

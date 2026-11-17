@@ -323,15 +323,39 @@ public final class KvServer implements AutoCloseable {
         throw new IllegalArgumentException("bad port '" + s + "' in cluster entry '" + entry + "'");
     }
 
-    public static void main(String[] args) throws Exception {
+    private static final List<String> OPTIONS = List.of("--id", "--cluster", "--data", "--engine");
+
+    /**
+     * Reads {@code --name value} pairs. Unknown, repeated or valueless options are refused: they used to be
+     * skipped, and a typo such as {@code --date /mnt/n1} then started the node on the default data directory,
+     * empty, so it came back having forgotten its log and the vote it cast in its current term.
+     */
+    public static Map<String, String> parseOptions(String[] args) {
         Map<String, String> opts = new LinkedHashMap<>();
-        for (int i = 0; i + 1 < args.length; i += 2) opts.put(args[i], args[i + 1]);
-        String id = opts.get("--id"), spec = opts.get("--cluster");
-        if (id == null || spec == null) {
+        for (int i = 0; i < args.length; i += 2) {
+            String name = args[i];
+            if (!OPTIONS.contains(name)) throw new IllegalArgumentException("unknown option " + name);
+            if (i + 1 >= args.length || args[i + 1].isEmpty()) throw new IllegalArgumentException(name + " needs a value");
+            if (opts.putIfAbsent(name, args[i + 1]) != null) throw new IllegalArgumentException(name + " given twice");
+        }
+        if (!opts.containsKey("--id") || !opts.containsKey("--cluster")) {
+            throw new IllegalArgumentException("--id and --cluster are required");
+        }
+        return opts;
+    }
+
+    public static void main(String[] args) throws Exception {
+        Map<String, String> opts;
+        try {
+            opts = parseOptions(args);
+        } catch (IllegalArgumentException e) {
+            System.err.println("raftkv: " + e.getMessage());
             System.err.println("usage: java -jar raftkv.jar --id n1 --cluster n1=host:raftPort:httpPort,... "
                     + "[--data dir] [--engine lsm|memory]");
             System.exit(2);
+            return;
         }
+        String id = opts.get("--id"), spec = opts.get("--cluster");
         Path data = Path.of(opts.getOrDefault("--data", "data/" + id));
         KvServer server = new KvServer(id, parseCluster(spec), data, RaftConfig.defaults(),
                 opts.getOrDefault("--engine", "lsm"));
