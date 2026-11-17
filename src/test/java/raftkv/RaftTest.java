@@ -1,12 +1,15 @@
 package raftkv;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import raftkv.core.Message;
 import raftkv.core.NotLeaderException;
 import raftkv.core.RaftConfig;
 import raftkv.core.RaftNode;
 import raftkv.kv.KvStateMachine;
+import raftkv.transport.Transport;
 
 /** Scenario tests for the core protocol on a five node simulated cluster. */
 public class RaftTest {
@@ -227,6 +230,34 @@ public class RaftTest {
             Check.equal(term, c.leader().status().term(), "no extra election");
             c.awaitConvergence(3000);
             c.assertSafe();
+        }
+    }
+
+    @Test
+    public void messagesFromOutsideTheClusterAreIgnored() {
+        try (Cluster c = new Cluster(3, 10)) {
+            RaftNode leader = c.awaitLeader(2000);
+            String left = c.ids.stream().filter(id -> !id.equals(leader.id())).findFirst().orElseThrow();
+            for (String id : c.ids) if (!id.equals(left)) c.crash(id);
+            RaftNode alone = c.node(left);
+            // A stranger (another cluster, a misconfigured node) grants every vote it sees asked for. With
+            // its votes counted, a lone node of three would reach "two of three" and lead a cluster of one.
+            Transport stranger = c.net.factory().connect("x1", m -> {});
+            long deadline = System.currentTimeMillis() + 1000;
+            while (System.currentTimeMillis() < deadline) {
+                long term = alone.status().term();
+                stranger.send(left, new Message.VoteReply(term, "x1", true, true));
+                stranger.send(left, new Message.VoteReply(term, "x1", true, false));
+                Check.isTrue(alone.status().role() != RaftNode.Role.LEADER, "a stranger's votes elected a leader");
+                Check.sleep(2);
+            }
+            // Nor can a stranger claiming a higher term take over as its leader.
+            long term = alone.status().term();
+            stranger.send(left, new Message.AppendEntries(term + 5, "x1", 0, 0, List.of(), 0, 1));
+            Check.sleep(50);
+            Check.isTrue(alone.status().term() < term + 5, "term raised by a stranger");
+            Check.isTrue(!"x1".equals(alone.status().leaderId()), "a stranger became the leader");
+            stranger.close();
         }
     }
 }

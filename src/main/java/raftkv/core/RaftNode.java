@@ -57,6 +57,7 @@ public final class RaftNode {
 
     private final String id;
     private final List<String> peers;
+    private final Set<String> peerSet;
     private final Storage storage;
     private final StateMachine stateMachine;
     private final RaftConfig config;
@@ -107,6 +108,7 @@ public final class RaftNode {
                     Listener listener, TransportFactory transportFactory, EventLoop loop, Random random) {
         this.id = id;
         this.peers = List.copyOf(peers);
+        this.peerSet = Set.copyOf(this.peers);
         this.storage = storage;
         this.stateMachine = stateMachine;
         this.config = config;
@@ -248,6 +250,10 @@ public final class RaftNode {
     // ------------------------------------------------------------------ message handling
 
     private void handle(Message m) {
+        // Only the configured peers take part. A node from another cluster, or one started with a different
+        // --cluster list, would otherwise have its granted votes counted towards our quorum, and its
+        // AppendEntries could make this node a follower of a leader that is not in the cluster at all.
+        if (!peerSet.contains(m.from())) return;
         // Raft rule: a higher term always wins. A PreVote probe carries a hypothetical term, so it is exempt.
         boolean probe = m instanceof RequestVote rv && rv.preVote();
         if (!probe && m.term() > storage.term()) stepDown(m.term(), null);
