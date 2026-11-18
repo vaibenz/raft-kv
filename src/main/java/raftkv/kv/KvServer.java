@@ -39,7 +39,7 @@ import raftkv.transport.TcpTransport;
  * the LSM tree under {@code data/sm}; {@code --engine memory} keeps it in a hash map and snapshots it whole. API:
  * {@code GET|PUT|DELETE /kv/{key}} and {@code GET /status}. Requests sent to a follower are redirected
  * (HTTP 307) to the leader. Optional headers {@code X-Client-Id} and {@code X-Request-Seq} make retried
- * writes exactly once (a client id without a positive sequence number gets 400); a write older than the client's latest applied one gets 409. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413.
+ * writes exactly once (a client id without a positive sequence number gets 400); a write older than the client's latest applied one gets 409. Values are capped at {@link #MAX_VALUE_BYTES}; a larger PUT gets 413. Keys are capped at {@link #MAX_KEY_BYTES}; a longer one gets 414.
  */
 public final class KvServer implements AutoCloseable {
     public record NodeAddress(String host, int raftPort, int httpPort) {}
@@ -49,6 +49,13 @@ public final class KvServer implements AutoCloseable {
      * and kept until the next snapshot, so one unbounded request could stall the whole cluster or exhaust memory.
      */
     public static final int MAX_VALUE_BYTES = 1 << 20;
+
+    /**
+     * Longest key, in UTF-8 bytes after URL decoding. The JDK HTTP server accepts a request path of a few hundred
+     * KB, and a key is copied into every log entry that writes it, every replica's map and the in memory index of
+     * every LSM table that holds it, so it is capped far below the value cap. A longer key gets 414.
+     */
+    public static final int MAX_KEY_BYTES = 1024;
 
     private final String id;
     private final Map<String, NodeAddress> cluster;
@@ -148,6 +155,10 @@ public final class KvServer implements AutoCloseable {
         String key = ex.getRequestURI().getPath().substring("/kv/".length());
         if (key.isEmpty()) {
             reply(ex, 400, "missing key\n");
+            return;
+        }
+        if (key.getBytes(StandardCharsets.UTF_8).length > MAX_KEY_BYTES) {
+            reply(ex, 414, "key longer than " + MAX_KEY_BYTES + " bytes\n");
             return;
         }
         long clientId = header(ex, "X-Client-Id", 0);

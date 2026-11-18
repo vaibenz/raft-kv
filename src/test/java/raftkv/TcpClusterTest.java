@@ -142,6 +142,18 @@ public class TcpClusterTest {
             for (int i = 0; i < 20; i++)
                 Check.equal(413, call("PUT", leaderPort, "/kv/big", atCap + "x").statusCode(), "value over the cap");
             Check.equal(atCap.length(), call("GET", leaderPort, "/kv/big", null).body().length(), "big value kept");
+            // Keys are capped too: the JDK server takes a path of a few hundred KB, and every key is copied into
+            // the log, every replica's map and the in memory index of each LSM table that holds it.
+            String longestKey = "k".repeat(KvServer.MAX_KEY_BYTES);
+            Check.equal(200, call("PUT", leaderPort, "/kv/" + longestKey, "v").statusCode(), "key at the cap");
+            Check.equal("v", call("GET", leaderPort, "/kv/" + longestKey, null).body(), "key at the cap kept");
+            Check.equal(414, call("PUT", leaderPort, "/kv/" + longestKey + "k", "v").statusCode(), "key over the cap");
+            Check.equal(414, call("GET", leaderPort, "/kv/" + longestKey + "k", null).statusCode(), "get, too long");
+            // Counted in UTF-8 bytes after decoding: 512 two byte characters fit, one more does not.
+            String e9 = "%C3%A9";
+            Check.equal(200, call("PUT", leaderPort, "/kv/" + e9.repeat(512), "v").statusCode(), "512 x e-acute");
+            Check.equal(414, call("PUT", leaderPort, "/kv/" + e9.repeat(513), "v").statusCode(), "513 x e-acute");
+            Check.equal(null, servers.get(leader).store().get("k".repeat(KvServer.MAX_KEY_BYTES + 1)), "nothing stored");
             Check.isTrue(call("GET", followerPort, "/status", null).body().contains("\"role\":\"FOLLOWER\""),
                     "status endpoint");
 
