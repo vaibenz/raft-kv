@@ -360,13 +360,27 @@ public final class KvServer implements AutoCloseable {
         if (!opts.containsKey("--id") || !opts.containsKey("--cluster")) {
             throw new IllegalArgumentException("--id and --cluster are required");
         }
+        String engine = opts.get("--engine");
+        if (engine != null && !engine.equals("lsm") && !engine.equals("memory")) {
+            throw new IllegalArgumentException("unknown engine " + engine + " (use lsm or memory)");
+        }
         return opts;
     }
 
+    /**
+     * Every mistake on the command line is reported as a usage error before anything is opened. A bad --cluster
+     * or an --id missing from it used to escape as a stack trace, and an unknown --engine was only noticed after
+     * the Raft log had already been created in the data directory.
+     */
     public static void main(String[] args) throws Exception {
         Map<String, String> opts;
+        Map<String, NodeAddress> cluster;
         try {
             opts = parseOptions(args);
+            cluster = parseCluster(opts.get("--cluster"));
+            if (!cluster.containsKey(opts.get("--id"))) {
+                throw new IllegalArgumentException("node " + opts.get("--id") + " is not in the cluster list");
+            }
         } catch (IllegalArgumentException e) {
             System.err.println("raftkv: " + e.getMessage());
             System.err.println("usage: java -jar raftkv.jar --id n1 --cluster n1=host:raftPort:httpPort,... "
@@ -374,9 +388,9 @@ public final class KvServer implements AutoCloseable {
             System.exit(2);
             return;
         }
-        String id = opts.get("--id"), spec = opts.get("--cluster");
+        String id = opts.get("--id");
         Path data = Path.of(opts.getOrDefault("--data", "data/" + id));
-        KvServer server = new KvServer(id, parseCluster(spec), data, RaftConfig.defaults(),
+        KvServer server = new KvServer(id, cluster, data, RaftConfig.defaults(),
                 opts.getOrDefault("--engine", "lsm"));
         Runtime.getRuntime().addShutdownHook(new Thread(server::close));
         server.start();

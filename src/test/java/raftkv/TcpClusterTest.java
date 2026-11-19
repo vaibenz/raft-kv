@@ -51,12 +51,16 @@ public class TcpClusterTest {
     public void refusesUnknownOrIncompleteOptions() {
         Map<String, String> ok = KvServer.parseOptions(new String[] {"--id", "n1", "--cluster", "n1=a:1:2", "--data", "d"});
         Check.equal("d", ok.get("--data"), "data dir");
+        Check.equal("memory", KvServer.parseOptions(new String[] {"--id", "n1", "--cluster", "n1=a:1:2",
+                "--engine", "memory"}).get("--engine"), "memory engine");
         for (String[] bad : new String[][] {
                 {"--id", "n1", "--cluster", "n1=a:1:2", "--date", "/mnt/n1"}, // a typo used to mean the default dir
                 {"--id", "n1", "--cluster", "n1=a:1:2", "--data"},
                 {"--id", "n1", "--cluster", "n1=a:1:2", "--data", ""},
                 {"--id", "n1", "--id", "n2", "--cluster", "n1=a:1:2"},
                 {"--cluster", "n1=a:1:2"},
+                {"--id", "n1", "--cluster", "n1=a:1:2", "--engine", "rocks"}, // used to create the raft log first
+                {"--id", "n1", "--cluster", "n1=a:1:2", "--engine", "LSM"},
                 {"n1", "--id", "--cluster", "n1=a:1:2"}}) {
             try {
                 KvServer.parseOptions(bad);
