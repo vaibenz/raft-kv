@@ -302,7 +302,8 @@ public final class KvServer implements AutoCloseable {
      * Parses {@code id=host:raftPort:httpPort,...}. Every node must be started with the same list, so a mistake
      * here is refused with a message rather than tolerated: a repeated id used to overwrite the earlier entry,
      * which quietly shrinks the cluster and changes what a majority is, and a short entry failed with an
-     * ArrayIndexOutOfBoundsException.
+     * ArrayIndexOutOfBoundsException. Ids are letters, digits, '.', '_' and '-': an id goes into the /status JSON
+     * as is, and "n1 = host:..." used to give the id "n1 " and the host " host", which never resolves.
      */
     public static Map<String, NodeAddress> parseCluster(String spec) {
         Map<String, NodeAddress> m = new LinkedHashMap<>();
@@ -312,6 +313,13 @@ public final class KvServer implements AutoCloseable {
             String[] hp = kv.length == 2 ? kv[1].split(":", -1) : new String[0];
             if (kv[0].isEmpty() || hp.length != 3 || hp[0].isEmpty()) {
                 throw new IllegalArgumentException("bad cluster entry '" + entry + "', want id=host:raftPort:httpPort");
+            }
+            if (!kv[0].matches("[A-Za-z0-9._-]+")) {
+                throw new IllegalArgumentException("bad node id '" + kv[0] + "' in cluster entry '" + entry
+                        + "', use letters, digits, '.', '_' or '-'");
+            }
+            if (!hp[0].matches("[A-Za-z0-9.-]+")) {
+                throw new IllegalArgumentException("bad host '" + hp[0] + "' in cluster entry '" + entry + "'");
             }
             NodeAddress a = new NodeAddress(hp[0], port(hp[1], entry), port(hp[2], entry));
             if (a.raftPort() == a.httpPort()) {

@@ -29,10 +29,15 @@ public class TcpClusterTest {
         Map<String, NodeAddress> m = KvServer.parseCluster("n1=127.0.0.1:7001:8001, n2=10.0.0.2:7002:8002");
         Check.equal(java.util.List.of("n1", "n2"), java.util.List.copyOf(m.keySet()), "ids in order");
         Check.equal(new NodeAddress("10.0.0.2", 7002, 8002), m.get("n2"), "second node");
+        Check.equal(java.util.List.of("node-1.a_b"), java.util.List.copyOf(
+                KvServer.parseCluster("node-1.a_b=kv-1.example.com:7001:8001").keySet()), "dots, dashes and underscores");
         for (String bad : new String[] {
                 "n1=a:1:2,n2=b:3:4,n2=c:5:6", // a repeated id would silently replace the earlier node
                 "n1=a:7001", "n1", "=a:1:2", "n1=:1:2", "n1=a:1:2:3",
-                "n1=a:x:2", "n1=a:0:2", "n1=a:1:70000", "n1=a:7001:7001"}) {
+                "n1=a:x:2", "n1=a:0:2", "n1=a:1:70000", "n1=a:7001:7001",
+                "n1 = a:1:2", "n1=a :1:2", // spaces around '=' or ':' end up in the id or the host
+                "n\"1=a:1:2", "n\\1=a:1:2", // would break the /status JSON
+                "n1=a/b:1:2", "n1=user@a:1:2"}) {
             try {
                 KvServer.parseCluster(bad);
                 throw new AssertionError("accepted " + bad);
