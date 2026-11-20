@@ -152,7 +152,12 @@ public final class KvServer implements AutoCloseable {
     private void serveKv(HttpExchange ex) throws IOException, TimeoutException {
         // URI path decoding: "%20" is a space but "+" stays a plus. URLDecoder is for form bodies and would turn
         // "/kv/a+b" into the key "a b".
-        String key = ex.getRequestURI().getPath().substring("/kv/".length());
+        String path = decodePath(ex.getRequestURI().getRawPath());
+        if (path == null || !path.startsWith("/kv/")) {
+            reply(ex, 400, "key is not valid UTF-8 once percent decoded\n");
+            return;
+        }
+        String key = path.substring("/kv/".length());
         if (key.isEmpty()) {
             reply(ex, 400, "missing key\n");
             return;
@@ -277,6 +282,37 @@ public final class KvServer implements AutoCloseable {
             int n = in.read(buf, 0, (int) Math.min(buf.length, left));
             if (n < 0) return;
             left -= n;
+        }
+    }
+
+    /**
+     * Percent decodes a raw URI path as UTF-8, or returns null if the bytes are not valid UTF-8. URI.getPath()
+     * turns every malformed sequence into U+FFFD, so "/kv/%FF" and "/kv/%FE" would both be stored under the
+     * key "\uFFFD" and overwrite each other.
+     */
+    static String decodePath(String raw) {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= raw.length()) return null;
+                int hi = Character.digit(raw.charAt(i + 1), 16), lo = Character.digit(raw.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) return null;
+                bytes.write(hi << 4 | lo);
+                i += 2;
+            } else {
+                int end = Character.isHighSurrogate(c) && i + 1 < raw.length() ? i + 2 : i + 1;
+                bytes.writeBytes(raw.substring(i, end).getBytes(StandardCharsets.UTF_8));
+                i = end - 1;
+            }
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray())).toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            return null;
         }
     }
 

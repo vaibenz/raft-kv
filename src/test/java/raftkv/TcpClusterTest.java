@@ -143,6 +143,14 @@ public class TcpClusterTest {
             Check.equal("plus", call("GET", leaderPort, "/kv/a+b", null).body(), "a+b is its own key");
             Check.equal("space", call("GET", leaderPort, "/kv/a%20b", null).body(), "a%20b is the key 'a b'");
             Check.equal("space", new String(servers.get(leader).store().get("a b")), "decoded key in the store");
+            // Escapes that are not UTF-8 are refused: decoded leniently, %FF and %FE both became U+FFFD and
+            // two different keys overwrote each other.
+            Check.equal(400, call("PUT", leaderPort, "/kv/%FF", "ff").statusCode(), "put %FF");
+            Check.equal(400, call("PUT", leaderPort, "/kv/%FE", "fe").statusCode(), "put %FE");
+            Check.equal(400, call("GET", leaderPort, "/kv/%C3", null).statusCode(), "truncated sequence");
+            Check.equal(null, servers.get(leader).store().get("\uFFFD"), "nothing stored under U+FFFD");
+            Check.equal(200, call("PUT", leaderPort, "/kv/caf%C3%A9", "e9").statusCode(), "put a real UTF-8 key");
+            Check.equal("e9", new String(servers.get(leader).store().get("caf\u00e9")), "decoded UTF-8 key");
 
             // Values are capped, so one request cannot put an unbounded entry in the replicated log.
             String atCap = "x".repeat(KvServer.MAX_VALUE_BYTES);
