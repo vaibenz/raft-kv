@@ -80,4 +80,54 @@ public class FileStorageTest {
             Check.equal(1L, s.lastIndex(), "corrupt record rejected");
         }
     }
+
+    /** A file body followed by its CRC32C, as FileStorage writes the meta and snapshot files. */
+    private static byte[] withCrc(byte[] body) {
+        java.util.zip.CRC32C c = new java.util.zip.CRC32C();
+        c.update(body);
+        return java.nio.ByteBuffer.allocate(body.length + 4).put(body).putInt((int) c.getValue()).array();
+    }
+
+    private static void expectCorrupt(Path dir, String what) {
+        try (FileStorage s = new FileStorage(dir)) {
+            throw new AssertionError(what + ": opened a damaged store, term " + s.term());
+        } catch (IOException expected) {
+            // refused cleanly, not with an OutOfMemoryError or a half loaded store
+        }
+    }
+
+    @Test
+    public void damagedMetaOrSnapshotLengthIsRefusedBeforeAllocating() throws IOException {
+        // Checksums that match, so only the length check stands between the bad length and an allocation.
+        Path dir = Files.createTempDirectory("raftkv");
+        Files.write(dir.resolve("meta"), withCrc(java.nio.ByteBuffer.allocate(12).putLong(3)
+                .putInt(Integer.MAX_VALUE).array()));
+        expectCorrupt(dir, "vote length 2^31 - 1");
+
+        dir = Files.createTempDirectory("raftkv");
+        Files.write(dir.resolve("snapshot"), withCrc(java.nio.ByteBuffer.allocate(20).putLong(7).putLong(2)
+                .putInt(Integer.MAX_VALUE).array()));
+        expectCorrupt(dir, "snapshot length 2^31 - 1");
+
+        dir = Files.createTempDirectory("raftkv");
+        Files.write(dir.resolve("meta"), withCrc(java.nio.ByteBuffer.allocate(13).putLong(3).putInt(0)
+                .put((byte) 9).array()));
+        expectCorrupt(dir, "meta with a byte after the vote");
+    }
+
+    @Test
+    public void metaChecksumIsCheckedAndGoodFilesStillLoad() throws IOException {
+        Path dir = Files.createTempDirectory("raftkv");
+        try (FileStorage s = new FileStorage(dir)) {
+            s.setTermAndVote(4, "n3");
+        }
+        try (FileStorage s = new FileStorage(dir)) {
+            Check.equal(4L, s.term(), "term reloads");
+            Check.equal("n3", s.votedFor(), "vote reloads");
+        }
+        byte[] meta = Files.readAllBytes(dir.resolve("meta"));
+        meta[9] ^= 0x01; // inside the vote length
+        Files.write(dir.resolve("meta"), meta);
+        expectCorrupt(dir, "meta with a flipped length bit");
+    }
 }

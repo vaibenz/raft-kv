@@ -75,13 +75,12 @@ public final class FileStorage implements Storage {
 
     private void loadMeta() throws IOException {
         if (!disk.exists(META)) return;
-        ByteBuffer b = ByteBuffer.wrap(disk.readAll(META));
+        ByteBuffer b = verified(disk.readAll(META), "meta");
         try {
             long t = b.getLong();
-            byte[] vote = new byte[b.getInt()];
+            byte[] vote = new byte[length(b, "meta")];
             b.get(vote);
-            int crc = b.getInt();
-            if (crc != crc(b.array(), 0, b.position() - 4)) throw new IOException("corrupt meta file");
+            if (b.hasRemaining()) throw new IOException("trailing bytes in meta file");
             term = t;
             votedFor = vote.length == 0 ? null : new String(vote, StandardCharsets.UTF_8);
         } catch (RuntimeException e) {
@@ -91,19 +90,37 @@ public final class FileStorage implements Storage {
 
     private void loadSnapshot() throws IOException {
         if (!disk.exists(SNAPSHOT)) return;
-        ByteBuffer b = ByteBuffer.wrap(disk.readAll(SNAPSHOT));
+        ByteBuffer b = verified(disk.readAll(SNAPSHOT), "snapshot");
         try {
             long index = b.getLong(), t = b.getLong();
-            byte[] data = new byte[b.getInt()];
+            byte[] data = new byte[length(b, "snapshot")];
             b.get(data);
-            int crc = b.getInt();
-            if (crc != crc(b.array(), 0, b.position() - 4)) throw new IOException("corrupt snapshot file");
+            if (b.hasRemaining()) throw new IOException("trailing bytes in snapshot file");
             base = index;
             baseTerm = t;
             snapshot = data;
         } catch (RuntimeException e) {
             throw new IOException("corrupt snapshot file", e);
         }
+    }
+
+    /**
+     * Checks a whole file's trailing CRC before any field is trusted, and returns the body without it. A damaged
+     * length field must never size an allocation: a vote length of 2^31 - 1 would be an OutOfMemoryError, not
+     * a "corrupt file" error.
+     */
+    private static ByteBuffer verified(byte[] data, String what) throws IOException {
+        int body = data.length - 4;
+        if (body < 0 || ByteBuffer.wrap(data, body, 4).getInt() != crc(data, 0, body))
+            throw new IOException("corrupt " + what + " file");
+        return ByteBuffer.wrap(data, 0, body);
+    }
+
+    /** A length prefix that must fit in what is left of the buffer. */
+    private static int length(ByteBuffer b, String what) throws IOException {
+        int len = b.getInt();
+        if (len < 0 || len > b.remaining()) throw new IOException("bad length " + len + " in " + what + " file");
+        return len;
     }
 
     private void loadLog() throws IOException {
