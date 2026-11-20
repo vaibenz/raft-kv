@@ -117,4 +117,50 @@ public class KvStateMachineTest {
         kv.apply(6, 1, KvStateMachine.put(42, 3, "k", b("third")));
         Check.equal("third", new String(kv.get("k")), "the next sequence number still applies");
     }
+
+    /**
+     * size() is a running count on the LSM engine (it used to scan the whole store on every /status). It must
+     * agree with the real contents through puts, overwrites, deletes, compare and set, retries, restores and a
+     * reopen from disk.
+     */
+    @Test
+    public void keyCountMatchesContentsOnBothEngines() throws IOException {
+        checkKeyCount(new KvStateMachine());
+        java.nio.file.Path dir = Files.createTempDirectory("raftkv-sm");
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(dir), LsmStore.Options.tiny())) {
+            checkKeyCount(lsm);
+        }
+        try (LsmStateMachine reopened = new LsmStateMachine(new RealDisk(dir), LsmStore.Options.tiny())) {
+            Check.equal(reopened.dump().size(), reopened.size(), "count after reopening");
+            Check.equal(3, reopened.size(), "keys after reopening");
+        }
+    }
+
+    private static <M extends StateMachine & KvStore> void checkKeyCount(M kv) {
+        long i = 0;
+        kv.apply(++i, 1, KvStateMachine.put(0, 0, "a", b("1")));
+        kv.apply(++i, 1, KvStateMachine.put(0, 0, "b", b("1")));
+        kv.apply(++i, 1, KvStateMachine.put(0, 0, "a", b("2")));            // overwrite: still two
+        Check.equal(2, kv.size(), "after an overwrite");
+        kv.apply(++i, 1, KvStateMachine.delete(0, 0, "missing"));           // nothing to delete
+        kv.apply(++i, 1, KvStateMachine.delete(0, 0, "b"));
+        kv.apply(++i, 1, KvStateMachine.delete(0, 0, "b"));                 // already gone
+        Check.equal(1, kv.size(), "after deletes");
+        kv.apply(++i, 1, KvStateMachine.cas(0, 0, "c", null, b("new")));    // creates c
+        kv.apply(++i, 1, KvStateMachine.cas(0, 0, "c", null, b("again")));  // fails, c exists
+        kv.apply(++i, 1, KvStateMachine.cas(0, 0, "c", b("new"), b("x")));  // replaces c
+        kv.apply(++i, 1, KvStateMachine.cas(0, 0, "d", b("no"), b("x")));   // fails, d absent
+        Check.equal(2, kv.size(), "after compare and set");
+        kv.apply(++i, 1, KvStateMachine.put(5, 1, "e", b("1")));
+        kv.apply(++i, 1, KvStateMachine.put(5, 1, "e", b("1")));            // retry, not applied twice
+        kv.apply(++i, 1, KvStateMachine.delete(5, 0, "e"));                 // stale, not applied
+        Check.equal(3, kv.size(), "retries and stale writes change nothing");
+        for (int k = 0; k < 300; k++) kv.apply(++i, 1, KvStateMachine.put(0, 0, "bulk" + k, b("v")));
+        for (int k = 0; k < 300; k++) kv.apply(++i, 1, KvStateMachine.delete(0, 0, "bulk" + k));
+        Check.equal(kv.dump().size(), kv.size(), "count matches contents");
+        byte[] image = kv.snapshot();
+        kv.apply(++i, 1, KvStateMachine.put(0, 0, "later", b("v")));
+        kv.restore(image, i, 1);
+        Check.equal(3, kv.size(), "count after restore");
+    }
 }

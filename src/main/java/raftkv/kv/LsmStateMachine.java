@@ -30,9 +30,22 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
     private static final byte SESSION = 0, DATA = 1; // first byte of every internal key
 
     private final LsmStore store;
+    /**
+     * Live data keys, kept up to date by every write so that {@link #size()} (shown by /status on every call) is not
+     * a scan that reads and buffers every block of every table. Counted once on open and after a restore. Written
+     * only by the apply thread, read by HTTP threads.
+     */
+    private volatile int dataKeys;
 
     public LsmStateMachine(Disk disk, LsmStore.Options options) throws IOException {
         this.store = LsmStore.open(disk, options);
+        this.dataKeys = countDataKeys();
+    }
+
+    private int countDataKeys() {
+        int n = 0;
+        for (Entry e : store.liveEntries()) if (e.key()[0] == DATA) n++;
+        return n;
     }
 
     public LsmStore store() {
@@ -79,16 +92,19 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
         byte[] current = store.get(key);
         byte[] result = switch (c.op()) {
             case KvStateMachine.PUT -> {
+                if (current == null) dataKeys++;
                 store.put(key, c.value());
                 yield KvStateMachine.orEmpty(current);
             }
             case KvStateMachine.DELETE -> {
                 if (current == null) yield new byte[0];
                 store.delete(key);
+                dataKeys--;
                 yield KvStateMachine.DELETED;
             }
             case KvStateMachine.CAS -> {
                 if (!KvStateMachine.casMatches(current, c.expected())) yield KvStateMachine.CAS_FAILED;
+                if (current == null) dataKeys++;
                 store.put(key, c.value());
                 yield KvStateMachine.CAS_OK;
             }
@@ -138,6 +154,7 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
             }
         }
         store.restore(entries, index, term); // durable before Raft records the snapshot in its log
+        dataKeys = countDataKeys();
     }
 
     @Override
@@ -157,9 +174,7 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
 
     @Override
     public int size() {
-        int n = 0;
-        for (Entry e : store.liveEntries()) if (e.key()[0] == DATA) n++;
-        return n;
+        return dataKeys;
     }
 
     @Override
