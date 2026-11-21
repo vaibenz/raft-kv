@@ -438,10 +438,25 @@ public final class RaftNode {
         long prev = next - 1;
         int batch = Buggify.fire(Site.TINY_APPEND_BATCH, 0.5) ? 1 : config.maxBatch();
         long last = Math.min(syncedIndex, prev + batch); // only ship entries that are durable here
-        List<LogEntry> entries = last >= next ? storage.slice(next, last + 1) : List.of();
+        List<LogEntry> entries = last >= next ? withinBytes(storage.slice(next, last + 1)) : List.of();
+        last = prev + entries.size();
         send(peer, new AppendEntries(storage.term(), id, prev, storage.termAt(prev), entries, commitIndex, round));
         // Pipelining: assume success and keep streaming. A lost or rejected batch is corrected by the reply.
         if (!entries.isEmpty()) nextIndex.put(peer, last + 1);
+    }
+
+    /**
+     * The longest prefix whose commands fit in {@code maxBatchBytes}, but always at least one entry. Counting
+     * entries alone let 512 values of 1 MiB make a frame the peer's transport refuses, so a lagging follower
+     * could never catch up.
+     */
+    private List<LogEntry> withinBytes(List<LogEntry> entries) {
+        long bytes = 0;
+        for (int i = 0; i < entries.size(); i++) {
+            bytes += entries.get(i).command().length;
+            if (i > 0 && bytes > config.maxBatchBytes()) return entries.subList(0, i);
+        }
+        return entries;
     }
 
     private void onAppendReply(AppendReply r) {

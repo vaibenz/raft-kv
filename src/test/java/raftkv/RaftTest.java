@@ -134,6 +134,27 @@ public class RaftTest {
         }
     }
 
+    @Test
+    public void appendBatchesStayWithinTheByteBudget() {
+        RaftConfig f = RaftConfig.fast();
+        int budget = 32 * 1024;
+        RaftConfig config = new RaftConfig(f.electionMinMs(), f.electionMaxMs(), f.heartbeatMs(), f.maxBatch(),
+                100_000, budget);
+        try (Cluster c = new Cluster(3, 12, config)) {
+            RaftNode leader = c.awaitLeader(2000);
+            String down = c.ids.stream().filter(id -> !id.equals(leader.id())).findFirst().orElseThrow();
+            c.crash(down);
+            String big = "x".repeat(4096);
+            for (int i = 0; i < 200; i++) c.put("k" + i, big + i, 1, i + 1, 2000); // 800 KiB behind
+            c.restart(down);
+            c.awaitConvergence(5000);
+            Check.equal(big + 199, value(c, down, "k199"), "lagging node caught up");
+            // one entry over the budget may push a batch past it, but never by a whole entry more
+            Check.isTrue(c.net.largestFrame() < budget + 2 * 4096, "largest frame " + c.net.largestFrame());
+            c.assertSafe();
+        }
+    }
+
     private static RaftConfig snapshotEvery(int entries) {
         RaftConfig f = RaftConfig.fast();
         return new RaftConfig(f.electionMinMs(), f.electionMaxMs(), f.heartbeatMs(), f.maxBatch(), entries);

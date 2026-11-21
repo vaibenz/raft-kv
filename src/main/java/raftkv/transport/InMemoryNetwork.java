@@ -27,6 +27,7 @@ public final class InMemoryNetwork implements AutoCloseable {
     private volatile double dropRate;
     private volatile int minDelayMs, maxDelayMs;
     private volatile Map<String, Integer> groupOf = Map.of(); // empty map = fully connected
+    private final java.util.concurrent.atomic.AtomicInteger largestFrame = new java.util.concurrent.atomic.AtomicInteger();
 
     public InMemoryNetwork(long seed) {
         this.random = new Random(seed);
@@ -60,6 +61,9 @@ public final class InMemoryNetwork implements AutoCloseable {
 
     public void heal() { groupOf = Map.of(); }
 
+    /** The size of the largest encoded message sent so far, as it would go on the wire. */
+    public int largestFrame() { return largestFrame.get(); }
+
     public boolean connected(String a, String b) {
         Map<String, Integer> g = groupOf;
         return g.isEmpty() || (g.containsKey(a) && g.get(a).equals(g.get(b)));
@@ -73,6 +77,7 @@ public final class InMemoryNetwork implements AutoCloseable {
             delay = maxDelayMs > minDelayMs ? minDelayMs + random.nextInt(maxDelayMs - minDelayMs) : minDelayMs;
         }
         byte[] wireBytes = Codec.encode(m);
+        largestFrame.accumulateAndGet(wireBytes.length, Math::max);
         Runnable arrive = () -> {
             Consumer<Message> inbox = inboxes.get(to);
             if (inbox != null && connected(from, to)) inbox.accept(Codec.decode(wireBytes));
