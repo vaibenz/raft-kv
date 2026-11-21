@@ -92,6 +92,8 @@ public final class RaftNode {
     private boolean flushScheduled;
     private final TreeMap<Long, PendingWrite> pendingWrites = new TreeMap<>();
     private final List<PendingRead> pendingReads = new ArrayList<>();
+    /** Client futures whose task is queued on the loop or running: stop() must not leave them hanging. */
+    private final Set<CompletableFuture<?>> submitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private Cancellable electionTimer;
     private Cancellable heartbeatTimer;
@@ -150,6 +152,10 @@ public final class RaftNode {
         loop.shutdown();
         if (transport != null) transport.close();
         failPending(new NotLeaderException(null));
+        // Tasks still queued were dropped with the loop, and a storage failure can stop the node in the middle
+        // of the very task that would have registered its future. Either way nobody would ever complete them.
+        for (CompletableFuture<?> f : submitted) f.completeExceptionally(new NotLeaderException(null));
+        submitted.clear();
     }
 
     public String id() {
@@ -212,7 +218,19 @@ public final class RaftNode {
     }
 
     private void submit(CompletableFuture<?> f, Runnable task) {
-        if (!running || !loop.execute(() -> safely(task))) f.completeExceptionally(new NotLeaderException(null));
+        submitted.add(f);
+        boolean queued = running && loop.execute(() -> {
+            try {
+                safely(task);
+            } finally {
+                submitted.remove(f);
+                if (!running) f.completeExceptionally(new NotLeaderException(null)); // no-op if already done
+            }
+        });
+        if (!queued) {
+            submitted.remove(f);
+            f.completeExceptionally(new NotLeaderException(null));
+        }
     }
 
     private void safely(Runnable task) {

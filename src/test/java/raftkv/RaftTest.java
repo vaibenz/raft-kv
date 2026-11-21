@@ -155,6 +155,49 @@ public class RaftTest {
         }
     }
 
+    @Test
+    public void writesFailFastWhenTheNodeStopsOnAStorageFailure() throws Exception {
+        raftkv.storage.MemoryStorage real = new raftkv.storage.MemoryStorage();
+        java.util.concurrent.atomic.AtomicBoolean broken = new java.util.concurrent.atomic.AtomicBoolean();
+        raftkv.storage.Storage storage = (raftkv.storage.Storage) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {raftkv.storage.Storage.class}, (proxy, method, args) -> {
+                    if (broken.get() && method.getName().equals("append"))
+                        throw new java.io.UncheckedIOException(new java.io.IOException("disk gone"));
+                    try {
+                        return method.invoke(real, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        try (raftkv.transport.InMemoryNetwork net = new raftkv.transport.InMemoryNetwork(13)) {
+            RaftNode node = new RaftNode("n1", List.of(), storage, new KvStateMachine(), RaftConfig.fast(),
+                    raftkv.core.Listener.NONE, net.factory());
+            node.start();
+            try {
+                long deadline = System.currentTimeMillis() + 2000;
+                while (node.status().role() != RaftNode.Role.LEADER && System.currentTimeMillis() < deadline)
+                    Check.sleep(5);
+                node.propose(KvStateMachine.put(1, 1, "a", "1".getBytes())).get(2, TimeUnit.SECONDS);
+                broken.set(true);
+                // The first write hits the failure; the rest are queued behind it when the node stops itself.
+                List<CompletableFuture<byte[]>> writes = new java.util.ArrayList<>();
+                for (int i = 0; i < 50; i++)
+                    writes.add(node.propose(KvStateMachine.put(1, 2 + i, "a", "x".getBytes())));
+                for (CompletableFuture<byte[]> w : writes) {
+                    try {
+                        w.get(1, TimeUnit.SECONDS);
+                        throw new AssertionError("a write succeeded on a node that cannot persist");
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        Check.isTrue(e.getCause() instanceof NotLeaderException, "failed with " + e.getCause());
+                    }
+                }
+                Check.isTrue(!node.isRunning(), "the node stopped itself");
+            } finally {
+                node.stop();
+            }
+        }
+    }
+
     private static RaftConfig snapshotEvery(int entries) {
         RaftConfig f = RaftConfig.fast();
         return new RaftConfig(f.electionMinMs(), f.electionMaxMs(), f.heartbeatMs(), f.maxBatch(), entries);
