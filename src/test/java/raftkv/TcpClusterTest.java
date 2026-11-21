@@ -15,6 +15,7 @@ import raftkv.core.RaftConfig;
 import raftkv.core.RaftNode;
 import raftkv.kv.KvServer;
 import raftkv.kv.KvServer.NodeAddress;
+import raftkv.transport.TcpTransport;
 
 /** End to end: real TCP between nodes, real fsync to disk, and the HTTP client API. */
 public class TcpClusterTest {
@@ -83,6 +84,32 @@ public class TcpClusterTest {
         if (client != 0) b.header("X-Client-Id", Long.toString(client)).header("X-Request-Seq", Long.toString(seq));
         b.method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body));
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    public void anOversizedMessageIsNeverPutOnTheWire() throws Exception {
+        // b is a bare socket, so the test sees exactly which frames a writes. A frame over the cap would make a
+        // real peer close the connection, and a would throw away every message queued behind it.
+        try (ServerSocket b = new ServerSocket(0)) {
+            Map<String, java.net.InetSocketAddress> addrs = Map.of(
+                    "a", new java.net.InetSocketAddress("127.0.0.1", freePort()),
+                    "b", new java.net.InetSocketAddress("127.0.0.1", b.getLocalPort()));
+            try (TcpTransport a = new TcpTransport("a", addrs.get("a"), addrs, m -> {})) {
+                a.send("b", new raftkv.core.Message.InstallSnapshot(1, "a", 5, 1, new byte[TcpTransport.MAX_FRAME], 1));
+                a.send("b", new raftkv.core.Message.RequestVote(2, "a", 0, 0, false));
+                b.setSoTimeout(5000);
+                try (java.net.Socket s = b.accept();
+                     java.io.DataInputStream in = new java.io.DataInputStream(s.getInputStream())) {
+                    s.setSoTimeout(5000);
+                    int len = in.readInt();
+                    Check.isTrue(len > 0 && len <= TcpTransport.MAX_FRAME, "first frame is " + len + " bytes");
+                    byte[] frame = new byte[len];
+                    in.readFully(frame);
+                    raftkv.core.Message m = raftkv.transport.Codec.decode(frame);
+                    Check.isTrue(m instanceof raftkv.core.Message.RequestVote v && v.term() == 2, "got " + m);
+                }
+            }
+        }
     }
 
     @Test

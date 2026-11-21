@@ -168,7 +168,7 @@ make chaos      # the older real time chaos test, on real threads
 ## What I'd do next
 
 * Cluster membership changes (single server changes, as in Ongaro's thesis)
-* Stream snapshots in chunks instead of one message
+* Stream snapshots in chunks instead of one message: a frame is capped at 64 MiB, so today a larger image is dropped at the sender and cannot reach a follower
 * Move compaction to a background thread with write stalls, to remove the latency spikes it causes now
 * Prefix compression and block compression in SSTables
 * Expire client sessions

@@ -23,10 +23,12 @@ import raftkv.core.Message;
  * <p>Each peer gets one outbound connection and a sender thread fed by a bounded queue. The sender writes
  * every frame that is already queued before flushing, so a burst of messages costs one system call. If a
  * peer is down, frames are dropped and the connection is retried later: Raft's retries make that safe.
+ * A message that encodes to more than {@link #MAX_FRAME} bytes is dropped before it is queued: the peer
+ * would refuse it by closing the connection, losing every frame queued behind it.
  * All threads are Java 21 virtual threads.
  */
 public final class TcpTransport implements Transport {
-    private static final int MAX_FRAME = 64 << 20;
+    public static final int MAX_FRAME = 64 << 20;
     private static final int QUEUE_CAPACITY = 10_000;
 
     private final String selfId;
@@ -53,7 +55,14 @@ public final class TcpTransport implements Transport {
     @Override
     public void send(String to, Message m) {
         Peer p = peers.get(to);
-        if (p != null && !closed) p.queue.offer(Codec.encode(m)); // full queue: drop, Raft will retry
+        if (p == null || closed) return;
+        byte[] frame = Codec.encode(m);
+        if (frame.length > MAX_FRAME) {
+            System.err.println(selfId + ": dropping a " + frame.length + " byte " + m.getClass().getSimpleName()
+                    + " to " + to + ", over the " + MAX_FRAME + " byte frame limit");
+            return;
+        }
+        p.queue.offer(frame); // full queue: drop, Raft will retry
     }
 
     private void acceptLoop() {
