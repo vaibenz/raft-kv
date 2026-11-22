@@ -339,10 +339,13 @@ public final class KvServer implements AutoCloseable {
      * here is refused with a message rather than tolerated: a repeated id used to overwrite the earlier entry,
      * which quietly shrinks the cluster and changes what a majority is, and a short entry failed with an
      * ArrayIndexOutOfBoundsException. Ids are letters, digits, '.', '_' and '-': an id goes into the /status JSON
-     * as is, and "n1 = host:..." used to give the id "n1 " and the host " host", which never resolves.
+     * as is, and "n1 = host:..." used to give the id "n1 " and the host " host", which never resolves. No two
+     * nodes may share a host and port (Raft or HTTP): a copy pasted entry such as n3=h:7002:8003 next to
+     * n2=h:7002:8002 sent n3's Raft traffic to n2, and the second node to start failed to bind.
      */
     public static Map<String, NodeAddress> parseCluster(String spec) {
         Map<String, NodeAddress> m = new LinkedHashMap<>();
+        Map<String, String> endpoints = new java.util.HashMap<>(); // "host:port" -> the node that uses it
         for (String part : spec.split(",")) {
             String entry = part.trim();
             String[] kv = entry.split("=", 2);
@@ -363,6 +366,13 @@ public final class KvServer implements AutoCloseable {
             }
             if (m.putIfAbsent(kv[0], a) != null) {
                 throw new IllegalArgumentException("node " + kv[0] + " is listed twice in the cluster");
+            }
+            for (int port : new int[] {a.raftPort(), a.httpPort()}) {
+                String endpoint = a.host().toLowerCase(java.util.Locale.ROOT) + ":" + port;
+                String other = endpoints.putIfAbsent(endpoint, kv[0]);
+                if (other != null) {
+                    throw new IllegalArgumentException("nodes " + other + " and " + kv[0] + " both use " + endpoint);
+                }
             }
         }
         return m;
