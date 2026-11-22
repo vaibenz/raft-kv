@@ -19,6 +19,18 @@ public class RaftTest {
     }
 
     @Test
+    public void refusesARepeatedPeerOrItselfAsAPeer() {
+        for (List<String> bad : List.of(List.of("n2", "n2", "n2", "n2"), List.of("n1", "n2", "n3"))) {
+            try {
+                new RaftNode("n1", bad, null, null, RaftConfig.fast(), raftkv.core.Listener.NONE, null, null, null);
+                throw new AssertionError("accepted peers " + bad);
+            } catch (IllegalArgumentException expected) {
+                Check.isTrue(expected.getMessage() != null, "message for " + bad);
+            }
+        }
+    }
+
+    @Test
     public void electsExactlyOneLeader() {
         try (Cluster c = new Cluster(5, 1)) {
             RaftNode leader = c.awaitLeader(2000);

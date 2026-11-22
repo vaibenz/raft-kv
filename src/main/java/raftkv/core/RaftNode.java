@@ -111,6 +111,11 @@ public final class RaftNode {
         this.id = id;
         this.peers = List.copyOf(peers);
         this.peerSet = Set.copyOf(this.peers);
+        // Quorums are counted by walking the peer list, so a repeated peer would count once per listing: with
+        // n2 listed four times in a five node cluster, n2's acknowledgement alone would commit an entry. Listing
+        // ourselves would make the cluster look one node larger than it is.
+        if (peerSet.size() != this.peers.size()) throw new IllegalArgumentException("peer listed twice: " + peers);
+        if (peerSet.contains(id)) throw new IllegalArgumentException("node " + id + " is in its own peer list");
         this.storage = storage;
         this.stateMachine = stateMachine;
         this.config = config;
