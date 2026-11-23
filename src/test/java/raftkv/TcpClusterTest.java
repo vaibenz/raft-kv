@@ -166,6 +166,15 @@ public class TcpClusterTest {
             Check.equal(400, http.send(noSeq, HttpResponse.BodyHandlers.ofString()).statusCode(), "client id, no seq");
             Check.equal(400, call("PUT", leaderPort, "/kv/noseq", "b", 88, 0).statusCode(), "seq 0");
             Check.equal(400, call("PUT", leaderPort, "/kv/noseq", "b", 88, -1).statusCode(), "negative seq");
+            // The other way round: a sequence number with no client id (or the opt out id 0) is not deduplicated, so a
+            // client sending one would think its retries were safe while each was applied again.
+            HttpRequest noId = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + leaderPort + "/kv/noseq"))
+                    .header("X-Request-Seq", "1").PUT(HttpRequest.BodyPublishers.ofString("c")).build();
+            Check.equal(400, http.send(noId, HttpResponse.BodyHandlers.ofString()).statusCode(), "seq, no client id");
+            HttpRequest zeroId = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + leaderPort + "/kv/noseq"))
+                    .header("X-Client-Id", "0").header("X-Request-Seq", "1")
+                    .PUT(HttpRequest.BodyPublishers.ofString("c")).build();
+            Check.equal(400, http.send(zeroId, HttpResponse.BodyHandlers.ofString()).statusCode(), "seq, client id 0");
             Check.equal(404, call("GET", leaderPort, "/kv/noseq", null).statusCode(), "refused writes changed nothing");
 
             // Keys are decoded as URI paths: %20 is a space, but a plus sign stays a plus sign.

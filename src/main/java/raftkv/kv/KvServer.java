@@ -174,6 +174,12 @@ public final class KvServer implements AutoCloseable {
             reply(ex, 400, "X-Client-Id needs a positive X-Request-Seq\n");
             return;
         }
+        if (clientId == 0 && ex.getRequestHeaders().getFirst("X-Request-Seq") != null) {
+            // Client id 0 opts out of deduplication, so a sequence number without an id was accepted and ignored:
+            // the client believed its retries were exactly once while each one was applied again.
+            reply(ex, 400, "X-Request-Seq needs a nonzero X-Client-Id\n");
+            return;
+        }
         switch (ex.getRequestMethod()) {
             case "GET" -> {
                 await(node.readBarrier(), 3);
