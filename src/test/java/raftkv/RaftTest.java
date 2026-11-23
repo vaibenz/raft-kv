@@ -31,6 +31,25 @@ public class RaftTest {
     }
 
     @Test
+    public void refusesTimingThatCannotWork() {
+        int max = Integer.MAX_VALUE;
+        for (int[] bad : new int[][] {
+                {100, 200, 0}, {100, 200, -5}, // no heartbeat interval at all
+                {100, 200, max / 2 + 1},       // heartbeat * 2 wrapped negative, so 100 ms looked long enough
+                {max - 1, max, 800_000_000},   // the first heartbeat's stagger, heartbeat * 3, overflows an int
+                {100, 100, 10}, {30, 200, 15}}) {
+            try {
+                new RaftConfig(bad[0], bad[1], bad[2], 1);
+                throw new AssertionError("accepted " + java.util.Arrays.toString(bad));
+            } catch (IllegalArgumentException expected) {
+                Check.isTrue(expected.getMessage() != null, "message");
+            }
+        }
+        new RaftConfig(31, 32, 15, 1); // the tightest timing that is still valid
+        new RaftConfig(max - 1, max, max / 3, 1);
+    }
+
+    @Test
     public void electsExactlyOneLeader() {
         try (Cluster c = new Cluster(5, 1)) {
             RaftNode leader = c.awaitLeader(2000);

@@ -11,8 +11,12 @@ public record RaftConfig(int electionMinMs, int electionMaxMs, int heartbeatMs, 
     public static final int DEFAULT_MAX_BATCH_BYTES = 4 << 20;
 
     public RaftConfig {
-        if (electionMinMs <= heartbeatMs * 2 || electionMaxMs <= electionMinMs || maxBatch < 1 || snapshotThreshold < 1
-                || maxBatchBytes < 1)
+        // The heartbeat must be a real interval: 0 or less used to pass (any election timeout is above twice it) and
+        // then failed inside the node's timers. The comparison is in long, since heartbeatMs * 2 wrapped negative for
+        // a heartbeat over 2^30 ms and let a 100 ms election timeout through, and the first heartbeat is staggered
+        // over three intervals, which must fit in an int.
+        if (heartbeatMs < 1 || heartbeatMs > Integer.MAX_VALUE / 3 || electionMinMs <= 2L * heartbeatMs
+                || electionMaxMs <= electionMinMs || maxBatch < 1 || snapshotThreshold < 1 || maxBatchBytes < 1)
             throw new IllegalArgumentException("invalid Raft timing configuration");
     }
 
