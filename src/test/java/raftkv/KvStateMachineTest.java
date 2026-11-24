@@ -163,4 +163,61 @@ public class KvStateMachineTest {
         kv.restore(image, i, 1);
         Check.equal(3, kv.size(), "count after restore");
     }
+    /**
+     * The two engines must be interchangeable: every node of a cluster may use either, and a client must not be able
+     * to tell which one answered. Random puts, deletes and compare and sets from a few clients, with retries and stale
+     * sequence numbers mixed in, go to both; every result, the contents and the key count must agree, also across
+     * the flushes and compactions of a tiny LSM tree and a snapshot restored into a fresh copy of each.
+     */
+    @Test
+    public void bothEnginesGiveTheSameResults() throws IOException {
+        long seed = Long.getLong("seed", System.nanoTime());
+        java.util.Random rnd = new java.util.Random(seed);
+        KvStateMachine mem = new KvStateMachine();
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.tiny())) {
+            long[] seqs = new long[4]; // client 0 opts out of deduplication; 1 to 3 keep a sequence number
+            for (long index = 1; index <= 3000; index++) {
+                int client = rnd.nextInt(seqs.length);
+                long seq = 0;
+                if (client != 0) {
+                    int r = rnd.nextInt(10);
+                    seq = r == 0 ? seqs[client] : r == 1 ? Math.max(1, seqs[client] - 1 - rnd.nextInt(3)) : ++seqs[client];
+                }
+                String key = "k" + rnd.nextInt(40);
+                byte[] value = rnd.nextInt(8) == 0 ? new byte[0] : b("v" + rnd.nextInt(1000));
+                byte[] command = switch (rnd.nextInt(3)) {
+                    case 0 -> KvStateMachine.put(client, seq, key, value);
+                    case 1 -> KvStateMachine.delete(client, seq, key);
+                    default -> {
+                        byte[] current = mem.get(key);
+                        byte[] expected = rnd.nextBoolean() ? current : rnd.nextBoolean() ? null : b("v" + rnd.nextInt(1000));
+                        yield KvStateMachine.cas(client, seq, key, expected, value);
+                    }
+                };
+                byte[] a = mem.apply(index, 1, command), c = lsm.apply(index, 1, command);
+                String where = "command " + index + " (seed " + seed + ")";
+                Check.equal(KvStateMachine.isStale(a), KvStateMachine.isStale(c), "stale on both engines, " + where);
+                if (!KvStateMachine.isStale(a)) Check.isTrue(java.util.Arrays.equals(a, c), "same result, " + where);
+                if (index % 500 == 0) {
+                    Check.equal(mem.dump(), lsm.dump(), "same contents, " + where);
+                    Check.equal(mem.size(), lsm.size(), "same key count, " + where);
+                }
+            }
+            KvStateMachine memCopy = new KvStateMachine();
+            memCopy.restore(mem.snapshot(), 3000, 1);
+            try (LsmStateMachine lsmCopy = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                    LsmStore.Options.tiny())) {
+                lsmCopy.restore(lsm.snapshot(), 3000, 1);
+                Check.equal(mem.dump(), lsmCopy.dump(), "restored LSM copy has the same contents (seed " + seed + ")");
+                // The sessions came along too: the same retry is recognised the same way by both copies.
+                for (int client = 1; client < seqs.length; client++) {
+                    byte[] retry = KvStateMachine.put(client, seqs[client], "retry", b("x"));
+                    Check.isTrue(java.util.Arrays.equals(memCopy.apply(3001, 1, retry), lsmCopy.apply(3001, 1, retry)),
+                            "a retry after restore gives the same result on both engines (seed " + seed + ")");
+                }
+                Check.equal(memCopy.dump(), lsmCopy.dump(), "and leaves the same contents (seed " + seed + ")");
+            }
+        }
+    }
 }
