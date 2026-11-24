@@ -241,7 +241,11 @@ public final class KvServer implements AutoCloseable {
             reply(ex, 503, "no leader elected yet, retry\n");
             return;
         }
-        ex.getResponseHeaders().set("Location", "http://" + a.host() + ":" + a.httpPort() + ex.getRequestURI());
+        // The raw path and query, not the whole request URI: a client that sent the absolute form ("GET
+        // http://follower/kv/x") would otherwise get the follower's URI pasted after the leader's address.
+        java.net.URI uri = ex.getRequestURI();
+        String query = uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery();
+        ex.getResponseHeaders().set("Location", "http://" + a.host() + ":" + a.httpPort() + uri.getRawPath() + query);
         reply(ex, 307, "redirecting to leader " + leader + "\n");
     }
 

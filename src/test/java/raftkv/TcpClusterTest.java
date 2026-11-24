@@ -25,6 +25,17 @@ public class TcpClusterTest {
         }
     }
 
+    /** Sends raw request bytes and returns the response head, so a test controls the exact request line. */
+    private static String rawRequest(int port, String request) throws IOException {
+        try (java.net.Socket s = new java.net.Socket("127.0.0.1", port)) {
+            s.setSoTimeout(5000);
+            s.getOutputStream().write(request.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            String all = new String(s.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.ISO_8859_1);
+            int end = all.indexOf("\r\n\r\n");
+            return end < 0 ? all : all.substring(0, end + 2);
+        }
+    }
+
     @Test
     public void parsesTheClusterListAndRefusesMistakes() {
         Map<String, NodeAddress> m = KvServer.parseCluster("n1=127.0.0.1:7001:8001, n2=10.0.0.2:7002:8002");
@@ -141,6 +152,13 @@ public class TcpClusterTest {
             Check.equal(307, r.statusCode(), "follower redirects");
             Check.isTrue(r.headers().firstValue("Location").orElse("").contains(":" + leaderPort + "/kv/greeting"),
                     "Location points at the leader");
+            // An absolute form request target ("GET http://host/kv/x", RFC 9112 section 3.2.2, which a client sends
+            // through a proxy) must not be pasted in whole after the leader's address. The query goes along.
+            String head = rawRequest(followerPort, "GET http://127.0.0.1:" + followerPort + "/kv/greeting?x=1 HTTP/1.1\r\n"
+                    + "Host: 127.0.0.1:" + followerPort + "\r\nConnection: close\r\n\r\n");
+            Check.isTrue(head.startsWith("HTTP/1.1 307"), "absolute form redirects: " + head);
+            Check.isTrue(head.contains("\r\nLocation: http://127.0.0.1:" + leaderPort + "/kv/greeting?x=1\r\n"),
+                    "absolute form Location is the leader's address and the path: " + head);
 
             Check.equal(200, call("PUT", leaderPort, "/kv/greeting", "hello").statusCode(), "write via leader");
             r = call("GET", leaderPort, "/kv/greeting", null);
