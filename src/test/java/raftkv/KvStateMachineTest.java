@@ -100,6 +100,36 @@ public class KvStateMachineTest {
         }
     }
 
+    /**
+     * A damaged snapshot image must be refused without touching the current state. The in memory engine used to
+     * clear its map and sessions before decoding, so an image cut short left it empty while Raft kept applying the
+     * log on top as if nothing had happened.
+     */
+    @Test
+    public void damagedSnapshotLeavesTheStateAlone() throws IOException {
+        checkDamagedRestore(new KvStateMachine());
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.tiny())) {
+            checkDamagedRestore(lsm);
+        }
+    }
+
+    private static <M extends StateMachine & KvStore> void checkDamagedRestore(M kv) {
+        fillForSnapshot(kv);
+        byte[] image = kv.snapshot();
+        for (int cut : new int[] {2, 6, image.length / 2, image.length - 1}) {
+            try {
+                kv.restore(java.util.Arrays.copyOf(image, cut), 9, 1);
+                throw new AssertionError("an image cut to " + cut + " of " + image.length + " bytes was accepted");
+            } catch (RuntimeException expected) {
+                // refused
+            }
+            Check.equal(2, kv.size(), "keys after a refused image of " + cut + " bytes");
+            Check.equal("other client", new String(kv.get("k")), "data after a refused image of " + cut + " bytes");
+        }
+        checkRestoredSessions(kv);
+    }
+
     private static void fillForSnapshot(StateMachine kv) {
         kv.apply(1, 1, KvStateMachine.put(42, 1, "k", b("first")));
         kv.apply(2, 1, KvStateMachine.put(7, 1, "k", b("other client")));

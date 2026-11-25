@@ -155,25 +155,35 @@ public final class KvStateMachine implements StateMachine, KvStore {
         return snapshot(); // in memory: Raft keeps the image
     }
 
+    /**
+     * The whole image is decoded before anything is replaced, as {@link LsmStateMachine} does. Clearing first meant a
+     * damaged image threw halfway with the map already emptied, and Raft, which logs the error and carries on, kept
+     * applying the log on top of the empty map as if the old state were still there.
+     */
     @Override
     public void restore(byte[] image, long index, long term) {
+        Map<String, byte[]> newData = new HashMap<>();
+        Map<Long, Session> newSessions = new HashMap<>();
+        if (image.length > 0) {
+            ByteBuffer b = ByteBuffer.wrap(image);
+            for (int i = 0, n = b.getInt(); i < n; i++) {
+                byte[] k = new byte[b.getInt()];
+                b.get(k);
+                byte[] v = new byte[b.getInt()];
+                b.get(v);
+                newData.put(new String(k, StandardCharsets.UTF_8), v);
+            }
+            for (int i = 0, n = b.getInt(); i < n; i++) {
+                long client = b.getLong(), seq = b.getLong();
+                byte[] r = new byte[b.getInt()];
+                b.get(r);
+                newSessions.put(client, new Session(seq, r));
+            }
+        }
         data.clear();
+        data.putAll(newData);
         sessions.clear();
-        if (image.length == 0) return;
-        ByteBuffer b = ByteBuffer.wrap(image);
-        for (int i = 0, n = b.getInt(); i < n; i++) {
-            byte[] k = new byte[b.getInt()];
-            b.get(k);
-            byte[] v = new byte[b.getInt()];
-            b.get(v);
-            data.put(new String(k, StandardCharsets.UTF_8), v);
-        }
-        for (int i = 0, n = b.getInt(); i < n; i++) {
-            long client = b.getLong(), seq = b.getLong();
-            byte[] r = new byte[b.getInt()];
-            b.get(r);
-            sessions.put(client, new Session(seq, r));
-        }
+        sessions.putAll(newSessions);
     }
 
     /** Reads the local copy. Call only after {@code RaftNode.readBarrier()} for linearizable results. */
