@@ -121,7 +121,8 @@ public final class KvStateMachine implements StateMachine, KvStore {
     /**
      * The map and the client sessions, in key order so that equal states give equal bytes. Sessions must be
      * part of the snapshot: without them a client retrying a write that is already in the snapshot would have it
-     * applied a second time.
+     * applied a second time. {@link LsmStateMachine} writes and reads the same format, so either engine can install
+     * the other's snapshot.
      */
     @Override
     public byte[] snapshot() {

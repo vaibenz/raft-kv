@@ -53,7 +53,10 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
     }
 
     private static byte[] dataKey(String key) {
-        byte[] k = key.getBytes(StandardCharsets.UTF_8);
+        return dataKey(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static byte[] dataKey(byte[] k) {
         byte[] out = new byte[k.length + 1];
         out[0] = DATA;
         System.arraycopy(k, 0, out, 1, k.length);
@@ -121,18 +124,30 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
         return new byte[0]; // the store itself is the snapshot
     }
 
-    /** Every live internal key and value (data and sessions), in key order. */
+    /**
+     * The data and the client sessions in the same image format as {@link KvStateMachine#snapshot()}: the user's keys
+     * and values, then each session as client id, sequence number and result. A cluster may mix the two engines, and
+     * a follower must be able to install whatever its leader sends, so the store's internal keys stay internal.
+     */
     @Override
     public byte[] snapshot() {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (DataOutputStream out = new DataOutputStream(bytes)) {
-            List<Entry> live = store.liveEntries();
-            out.writeInt(live.size());
-            for (Entry e : live) {
-                out.writeInt(e.key().length);
-                out.write(e.key());
+            List<Entry> data = new ArrayList<>(), sessions = new ArrayList<>();
+            for (Entry e : store.liveEntries()) (e.key()[0] == DATA ? data : sessions).add(e);
+            out.writeInt(data.size());
+            for (Entry e : data) {
+                out.writeInt(e.key().length - 1);
+                out.write(e.key(), 1, e.key().length - 1);
                 out.writeInt(e.value().length);
                 out.write(e.value());
+            }
+            out.writeInt(sessions.size());
+            for (Entry e : sessions) { // value: [long seq][result]
+                out.writeLong(ByteBuffer.wrap(e.key(), 1, 8).getLong());
+                out.write(e.value(), 0, 8);
+                out.writeInt(e.value().length - 8);
+                out.write(e.value(), 8, e.value().length - 8);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -140,9 +155,15 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
         return bytes.toByteArray();
     }
 
+    /**
+     * Installs an image in the format of {@link #snapshot()}, from either engine. The whole image is decoded before
+     * the store is touched. The in memory engine lists keys in String order, which is not UTF-8 byte order for keys
+     * outside the Basic Multilingual Plane, so the entries are sorted into the store's order here.
+     */
     @Override
     public void restore(byte[] image, long index, long term) {
-        List<Entry> entries = new ArrayList<>();
+        TreeMap<byte[], byte[]> sorted = new TreeMap<>(Entry.KEY_ORDER);
+        int keys = 0;
         if (image.length > 0) {
             ByteBuffer b = ByteBuffer.wrap(image);
             for (int i = 0, n = b.getInt(); i < n; i++) {
@@ -150,11 +171,19 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
                 b.get(k);
                 byte[] v = new byte[b.getInt()];
                 b.get(v);
-                entries.add(new Entry(k, v));
+                if (sorted.put(dataKey(k), v) == null) keys++;
+            }
+            for (int i = 0, n = b.getInt(); i < n; i++) {
+                long client = b.getLong(), seq = b.getLong();
+                byte[] r = new byte[b.getInt()];
+                b.get(r);
+                sorted.put(sessionKey(client), ByteBuffer.allocate(8 + r.length).putLong(seq).put(r).array());
             }
         }
+        List<Entry> entries = new ArrayList<>(sorted.size());
+        sorted.forEach((k, v) -> entries.add(new Entry(k, v)));
         store.restore(entries, index, term); // durable before Raft records the snapshot in its log
-        dataKeys = countDataKeys();
+        dataKeys = keys;
     }
 
     @Override

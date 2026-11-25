@@ -101,6 +101,40 @@ public class KvStateMachineTest {
     }
 
     /**
+     * Nodes of one cluster may run different engines, so a follower must be able to install a snapshot taken by a
+     * leader on the other engine. The LSM engine used to send its internal keys (a type byte in front of every key,
+     * sessions stored as entries), which the in memory engine could not parse, and it read the in memory image as
+     * internal keys, so every key and session it held was lost. Keys that sort differently as UTF-16 and as UTF-8
+     * are included, because the LSM tables need their keys in UTF-8 byte order.
+     */
+    @Test
+    public void snapshotsMoveBetweenEngines() throws IOException {
+        KvStateMachine mem = new KvStateMachine();
+        fillForSnapshot(mem);
+        mem.apply(4, 1, KvStateMachine.put(0, 0, "\uFF5E", b("fullwidth tilde")));
+        mem.apply(5, 1, KvStateMachine.put(-9, 1, "\uD83D\uDE00", b("emoji")));
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.defaults())) {
+            lsm.restore(mem.snapshot(), 5, 1);
+            Check.equal(mem.dump(), lsm.dump(), "in memory image restored into the LSM engine");
+            Check.equal(4, lsm.size(), "key count after restoring an in memory image");
+            Check.isTrue(!KvStateMachine.isStale(lsm.apply(6, 1, KvStateMachine.put(-9, 1, "\uD83D\uDE00", b("x")))),
+                    "session of a negative client id came across");
+            Check.equal("emoji", new String(lsm.get("\uD83D\uDE00"), StandardCharsets.UTF_8), "retry not reapplied");
+            checkRestoredSessions(lsm);
+        }
+        try (LsmStateMachine lsm = new LsmStateMachine(new RealDisk(Files.createTempDirectory("raftkv-sm")),
+                LsmStore.Options.defaults())) {
+            fillForSnapshot(lsm);
+            lsm.apply(4, 1, KvStateMachine.put(0, 0, "\uFF5E", b("fullwidth tilde")));
+            KvStateMachine copy = new KvStateMachine();
+            copy.restore(lsm.snapshot(), 4, 1);
+            Check.equal(lsm.dump(), copy.dump(), "LSM image restored into the in memory engine");
+            checkRestoredSessions(copy);
+        }
+    }
+
+    /**
      * A damaged snapshot image must be refused without touching the current state. The in memory engine used to
      * clear its map and sessions before decoding, so an image cut short left it empty while Raft kept applying the
      * log on top as if nothing had happened.
