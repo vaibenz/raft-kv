@@ -215,15 +215,29 @@ public final class LsmStore implements AutoCloseable {
     // ------------------------------------------------------------------ writes
 
     public synchronized void put(byte[] key, byte[] value) {
-        memtable.put(key, value);
-        memtableBytes += key.length + value.length + 32;
+        replace(key, value);
         stats.userBytes += key.length + value.length;
     }
 
     public synchronized void delete(byte[] key) {
-        memtable.put(key, null);
-        memtableBytes += key.length + 32;
+        replace(key, null);
         stats.userBytes += key.length;
+    }
+
+    /**
+     * Puts one version in the memtable and keeps {@code memtableBytes} equal to what it holds. An overwrite replaces
+     * the old version, so its bytes come off: counting every write instead made a hot key (or a client's session
+     * key, rewritten on every one of its commands) fill the memtable on paper and flush tiny tables over and over.
+     */
+    private void replace(byte[] key, byte[] value) {
+        boolean had = memtable.containsKey(key);
+        byte[] old = memtable.put(key, value);
+        if (had) memtableBytes -= memtableCost(key, old);
+        memtableBytes += memtableCost(key, value);
+    }
+
+    private static long memtableCost(byte[] key, byte[] value) {
+        return key.length + (value == null ? 0 : value.length) + 32;
     }
 
     /** Records which position of the owner's log the current contents reflect. Made durable by {@link #flush}. */

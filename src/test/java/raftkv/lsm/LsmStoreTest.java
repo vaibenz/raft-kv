@@ -171,6 +171,28 @@ public class LsmStoreTest {
         }
     }
 
+    /**
+     * The memtable's size must be what it holds, not how many writes it has seen. Rewriting a few keys (as every
+     * client's session key is rewritten on each of its commands) used to count every write, so a 2 KB memtable
+     * holding three small keys asked to be flushed after a few dozen writes.
+     */
+    @Test
+    public void overwritesDoNotFillTheMemtable() throws IOException {
+        Path dir = Files.createTempDirectory("lsm");
+        LsmStore store = LsmStore.open(new RealDisk(dir), LsmStore.Options.tiny()); // 2048 byte memtable
+        for (int i = 0; i < 5000; i++) {
+            store.put(b("hot" + i % 3), b("v" + i + "-" + "x".repeat(50)));
+            if (i % 7 == 0) store.delete(b("hot" + i % 3));
+            Check.isTrue(!store.shouldFlush(), "three keys fill the memtable after " + i + " writes");
+        }
+        store.put(b("big"), b("y".repeat(3000)));
+        Check.isTrue(store.shouldFlush(), "a value larger than the memtable fills it");
+        store.put(b("big"), b("small"));
+        Check.isTrue(!store.shouldFlush(), "overwriting the large value frees its bytes");
+        Check.equal(0L, store.stats().flushes, "nothing was flushed");
+        store.close();
+    }
+
     @Test
     public void restoreReplacesEverythingAtomically() throws IOException {
         Path dir = Files.createTempDirectory("lsm");
