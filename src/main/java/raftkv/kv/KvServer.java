@@ -221,8 +221,22 @@ public final class KvServer implements AutoCloseable {
         reply(ex, 409, "stale request: a newer X-Request-Seq from this client was already applied\n");
     }
 
+    /**
+     * {@code GET /status} only. The JDK server hands a context every path that starts with its name, so
+     * "/statusx" and "/status/anything" used to be answered as /status, and so did a PUT or DELETE: a client that
+     * mistyped "/status" for "/kv/status" was told 200 with the node's JSON instead of being told it wrote nothing.
+     */
     private void handleStatus(HttpExchange ex) throws IOException {
         try (ex) {
+            if (!ex.getRequestURI().getRawPath().equals("/status")) {
+                reply(ex, 404, "not found\n");
+                return;
+            }
+            if (!ex.getRequestMethod().equals("GET")) {
+                ex.getResponseHeaders().set("Allow", "GET");
+                reply(ex, 405, "method not allowed\n");
+                return;
+            }
             RaftNode.Status s = node.status();
             String json = String.format(
                     "{\"id\":\"%s\",\"role\":\"%s\",\"term\":%d,\"leader\":%s,\"commitIndex\":%d,"

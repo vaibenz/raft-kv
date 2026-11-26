@@ -231,6 +231,13 @@ public class TcpClusterTest {
             Check.equal(null, servers.get(leader).store().get("k".repeat(KvServer.MAX_KEY_BYTES + 1)), "nothing stored");
             Check.isTrue(call("GET", followerPort, "/status", null).body().contains("\"role\":\"FOLLOWER\""),
                     "status endpoint");
+            // Only GET /status itself: the context used to answer any method and any path that began with it.
+            r = call("PUT", followerPort, "/status", "x");
+            Check.equal(405, r.statusCode(), "PUT /status");
+            Check.equal("GET", r.headers().firstValue("Allow").orElse(""), "Allow on /status");
+            Check.equal(405, call("DELETE", followerPort, "/status", null).statusCode(), "DELETE /status");
+            Check.equal(404, call("GET", followerPort, "/statusx", null).statusCode(), "GET /statusx");
+            Check.equal(404, call("GET", followerPort, "/status/n1", null).statusCode(), "GET /status/n1");
 
             // Kill the leader; the two survivors elect a new one and still have the data.
             servers.remove(leader).close();
