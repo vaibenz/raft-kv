@@ -57,6 +57,31 @@ public final class KvStateMachine implements StateMachine, KvStore {
         return new Command(op, clientId, seq, new String(k, StandardCharsets.UTF_8), value, expected);
     }
 
+    /**
+     * Reads one length prefixed field of a snapshot image. The length is checked against what is left before
+     * anything is allocated: a damaged length of 2^31 - 1 used to ask for a 2 GiB array and die with an
+     * OutOfMemoryError, which is not an exception the caller can refuse the image with.
+     */
+    static byte[] imageBytes(ByteBuffer b) {
+        int len = b.getInt();
+        if (len < 0 || len > b.remaining()) throw new IllegalArgumentException("damaged snapshot image: bad length " + len);
+        byte[] out = new byte[len];
+        b.get(out);
+        return out;
+    }
+
+    /** Reads an entry count of a snapshot image. A negative one used to read as zero entries. */
+    static int imageCount(ByteBuffer b) {
+        int n = b.getInt();
+        if (n < 0) throw new IllegalArgumentException("damaged snapshot image: negative count " + n);
+        return n;
+    }
+
+    /** Bytes left after the sessions mean the image is not one this format wrote: refuse it rather than guess. */
+    static void imageEnd(ByteBuffer b) {
+        if (b.hasRemaining()) throw new IllegalArgumentException("damaged snapshot image: " + b.remaining() + " trailing bytes");
+    }
+
     static byte[] orEmpty(byte[] v) {
         return v == null ? new byte[0] : v;
     }
@@ -167,19 +192,15 @@ public final class KvStateMachine implements StateMachine, KvStore {
         Map<Long, Session> newSessions = new HashMap<>();
         if (image.length > 0) {
             ByteBuffer b = ByteBuffer.wrap(image);
-            for (int i = 0, n = b.getInt(); i < n; i++) {
-                byte[] k = new byte[b.getInt()];
-                b.get(k);
-                byte[] v = new byte[b.getInt()];
-                b.get(v);
-                newData.put(new String(k, StandardCharsets.UTF_8), v);
+            for (int i = 0, n = imageCount(b); i < n; i++) {
+                byte[] k = imageBytes(b);
+                newData.put(new String(k, StandardCharsets.UTF_8), imageBytes(b));
             }
-            for (int i = 0, n = b.getInt(); i < n; i++) {
+            for (int i = 0, n = imageCount(b); i < n; i++) {
                 long client = b.getLong(), seq = b.getLong();
-                byte[] r = new byte[b.getInt()];
-                b.get(r);
-                newSessions.put(client, new Session(seq, r));
+                newSessions.put(client, new Session(seq, imageBytes(b)));
             }
+            imageEnd(b);
         }
         data.clear();
         data.putAll(newData);

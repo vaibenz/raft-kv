@@ -166,19 +166,16 @@ public final class LsmStateMachine implements StateMachine, KvStore, AutoCloseab
         int keys = 0;
         if (image.length > 0) {
             ByteBuffer b = ByteBuffer.wrap(image);
-            for (int i = 0, n = b.getInt(); i < n; i++) {
-                byte[] k = new byte[b.getInt()];
-                b.get(k);
-                byte[] v = new byte[b.getInt()];
-                b.get(v);
-                if (sorted.put(dataKey(k), v) == null) keys++;
+            for (int i = 0, n = KvStateMachine.imageCount(b); i < n; i++) {
+                byte[] k = KvStateMachine.imageBytes(b);
+                if (sorted.put(dataKey(k), KvStateMachine.imageBytes(b)) == null) keys++;
             }
-            for (int i = 0, n = b.getInt(); i < n; i++) {
+            for (int i = 0, n = KvStateMachine.imageCount(b); i < n; i++) {
                 long client = b.getLong(), seq = b.getLong();
-                byte[] r = new byte[b.getInt()];
-                b.get(r);
+                byte[] r = KvStateMachine.imageBytes(b);
                 sorted.put(sessionKey(client), ByteBuffer.allocate(8 + r.length).putLong(seq).put(r).array());
             }
+            KvStateMachine.imageEnd(b);
         }
         List<Entry> entries = new ArrayList<>(sorted.size());
         sorted.forEach((k, v) -> entries.add(new Entry(k, v)));

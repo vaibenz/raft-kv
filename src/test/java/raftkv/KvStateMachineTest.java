@@ -161,6 +161,22 @@ public class KvStateMachineTest {
             Check.equal(2, kv.size(), "keys after a refused image of " + cut + " bytes");
             Check.equal("other client", new String(kv.get("k")), "data after a refused image of " + cut + " bytes");
         }
+        // A length or count that cannot be right, and bytes after the last session, are refused the same way. A
+        // length of 2^31 - 1 used to allocate before the buffer ran out, and died with an OutOfMemoryError.
+        java.util.List<byte[]> damaged = new java.util.ArrayList<>();
+        damaged.add(java.nio.ByteBuffer.wrap(image.clone()).putInt(4, Integer.MAX_VALUE).array()); // first key length
+        damaged.add(java.nio.ByteBuffer.wrap(image.clone()).putInt(4, -1).array());
+        damaged.add(java.nio.ByteBuffer.wrap(image.clone()).putInt(0, -1).array()); // key count
+        damaged.add(java.util.Arrays.copyOf(image, image.length + 3)); // trailing bytes
+        for (byte[] bad : damaged) {
+            try {
+                kv.restore(bad, 9, 1);
+                throw new AssertionError("a damaged image of " + bad.length + " bytes was accepted");
+            } catch (IllegalArgumentException expected) {
+                // refused
+            }
+            Check.equal(2, kv.size(), "keys after a refused damaged image");
+        }
         checkRestoredSessions(kv);
     }
 
