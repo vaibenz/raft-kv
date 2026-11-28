@@ -144,6 +144,12 @@ public final class KvServer implements AutoCloseable {
             reply(ex, 503, "timed out waiting for the cluster\n");
         } catch (NumberFormatException e) {
             reply(ex, 400, "bad X-Client-Id or X-Request-Seq\n");
+        } catch (RuntimeException e) {
+            // Anything else, such as the LSM engine finding a corrupt block on a read. Left to the JDK server, the
+            // exception closed the connection without a byte, so the client saw a broken connection and retried a
+            // read that fails the same way every time. A 500 says the node itself is in trouble.
+            System.err.println(id + ": " + ex.getRequestMethod() + " " + ex.getRequestURI().getRawPath() + " failed: " + e);
+            reply(ex, 500, "internal error: " + e.getMessage() + "\n");
         } finally {
             ex.close();
         }

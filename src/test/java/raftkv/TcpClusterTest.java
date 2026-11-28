@@ -101,6 +101,33 @@ public class TcpClusterTest {
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    /** A read that throws (here, a corrupt LSM block) used to close the connection without a response. */
+    @Test
+    public void aFailedReadIsAnswered500NotADroppedConnection() throws Exception {
+        Map<String, NodeAddress> cluster = Map.of("n1", new NodeAddress("127.0.0.1", freePort(), freePort()));
+        Path dir = Files.createTempDirectory("raftkv-500");
+        try (KvServer s = new KvServer("n1", cluster, dir, RaftConfig.defaults(), "lsm")) {
+            s.start();
+            Check.eventually(() -> s.node().status().role() == RaftNode.Role.LEADER, 5000, "leader elected");
+            int port = cluster.get("n1").httpPort();
+            String big = "v".repeat(KvServer.MAX_VALUE_BYTES - 1000);
+            for (int i = 0; i < 5; i++) Check.equal(200, call("PUT", port, "/kv/k" + i, big).statusCode(), "put k" + i);
+            Path table;
+            try (var files = Files.list(dir.resolve("sm"))) { // five values over the 4 MiB memtable: flushed
+                table = files.filter(p -> p.getFileName().toString().startsWith("sst-")).findFirst().orElseThrow();
+            }
+            try (java.io.RandomAccessFile f = new java.io.RandomAccessFile(table.toFile(), "rw")) {
+                f.seek(10); // inside the first data block, which holds k0
+                int b = f.read();
+                f.seek(10);
+                f.write(b ^ 0x20);
+            }
+            HttpResponse<String> r = call("GET", port, "/kv/k0", null);
+            Check.equal(500, r.statusCode(), "a corrupt block is a server error");
+            Check.isTrue(r.body().contains("corrupt"), "the body says why: " + r.body());
+        }
+    }
+
     @Test
     public void anOversizedMessageIsNeverPutOnTheWire() throws Exception {
         // b is a bare socket, so the test sees exactly which frames a writes. A frame over the cap would make a
