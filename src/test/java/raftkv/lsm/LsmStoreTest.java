@@ -193,6 +193,24 @@ public class LsmStoreTest {
         store.close();
     }
 
+    /** Each of these used to be accepted: l0Trigger 0 crashed the first flush, levelBaseBytes 0 hung it. */
+    @Test
+    public void optionsThatCannotWorkAreRefused() {
+        int[][] bad = {{0, 256, 4096, 3, 12_288, 10, 32}, {2048, 0, 4096, 3, 12_288, 10, 32},
+                {2048, 256, 0, 3, 12_288, 10, 32}, {2048, 256, 4096, 0, 12_288, 10, 32},
+                {2048, 256, 4096, -1, 12_288, 10, 32}, {2048, 256, 4096, 3, 0, 10, 32},
+                {2048, 256, 4096, 3, 12_288, 0, 32}, {2048, 256, 4096, 3, 12_288, 10, -1}};
+        for (int[] o : bad) {
+            try {
+                new LsmStore.Options(o[0], o[1], o[2], o[3], o[4], o[5], o[6]);
+                throw new AssertionError("accepted " + Arrays.toString(o));
+            } catch (IllegalArgumentException expected) {
+                // refused when built
+            }
+        }
+        new LsmStore.Options(1, 1, 1, 1, 1, 1, 0); // the smallest values that still work
+    }
+
     @Test
     public void restoreReplacesEverythingAtomically() throws IOException {
         Path dir = Files.createTempDirectory("lsm");

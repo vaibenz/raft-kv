@@ -39,6 +39,21 @@ public final class LsmStore implements AutoCloseable {
     /** Sizing knobs. The tiny settings make every mechanism run constantly, for tests and the simulator. */
     public record Options(int memtableBytes, int blockBytes, long tableBytes, int l0Trigger, long levelBaseBytes,
                           int bitsPerKey, int cacheBlocks) {
+        /**
+         * Refuses sizes that cannot work, when the options are built rather than on the first flush. An l0Trigger
+         * of 0 made every flush try to compact an empty level 0 and fail with an IndexOutOfBoundsException, and a
+         * levelBaseBytes of 0 counted every level as over its limit, so a flush pushed tables down a new level
+         * forever and never returned.
+         */
+        public Options {
+            if (memtableBytes < 1 || blockBytes < 1 || tableBytes < 1 || l0Trigger < 1 || levelBaseBytes < 1
+                    || bitsPerKey < 1 || cacheBlocks < 0) {
+                throw new IllegalArgumentException("bad LSM options " + memtableBytes + "/" + blockBytes + "/"
+                        + tableBytes + "/" + l0Trigger + "/" + levelBaseBytes + "/" + bitsPerKey + "/" + cacheBlocks
+                        + ": sizes, l0Trigger and bitsPerKey must be at least 1, cacheBlocks at least 0");
+            }
+        }
+
         public static Options defaults() {
             return new Options(4 << 20, 4096, 2L << 20, 4, 8L << 20, 10, 2048);
         }
